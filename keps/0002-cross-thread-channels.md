@@ -639,6 +639,115 @@ thousands of connections*.
   spawn time; channels are strictly more general (M:N, first-class,
   reply-to) and already exist in the API. Rejected.
 
+## Prior art
+
+How other runtimes answer the same two questions — *what crosses a thread
+boundary, and who guarantees that's safe* — sorted by where the guarantee
+lives. (Survey current as of 2026-07; links verified.)
+
+| System | Heap model | Message cost | Safety guaranteed by | Fibers/tasks migrate? |
+|---|---|---|---|---|
+| **Kaappi (this KEP)** | isolated per thread | copy in + copy out (envelope) | runtime copy at boundary | no |
+| [Erlang/BEAM](https://www.erlang.org/blog/message-passing/) | isolated per process | one copy (into receiver heap/fragment) | runtime copy at boundary | yes (schedulers steal processes) |
+| [Racket places](https://docs.racket-lang.org/reference/places.html) | isolated per place | copy; restricted to immutable transparent values | runtime copy + message-type restriction | no |
+| [Dart isolates](https://medium.com/dartlang/dart-2-15-7e7a598e508a) | logically isolated, physically shared (isolate groups) | copy, or O(1) transfer at `Isolate.exit` | runtime copy / whole-graph transfer | no |
+| [Pony + ORCA](https://dl.acm.org/doi/10.1145/3133896) | per-actor heaps, zero-copy sharing | zero (reference passed) | static reference capabilities + ORCA GC protocol | yes (work-stealing actor scheduler) |
+| [Swift 6 regions](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0414-region-based-isolation.md) | shared | zero (`sending` transfers ownership) | compile-time region/flow analysis | tasks hop executors |
+| [Verona BoC](https://microsoft.github.io/verona/publications.html) | isolated regions | zero (region ownership transfer) | region type system + `when` scheduling | behaviours scheduled freely |
+| [OCaml 5](https://arxiv.org/abs/2004.11663) | shared (domains) | zero (reference) | programmer (+ `Atomic`, race-checked libs) | fibers stay on their domain; domainslib steals tasks |
+| [Go](https://go.dev/) | shared | zero (reference) | programmer + race detector | yes (goroutine work stealing) |
+| [Guile fibers](https://github.com/wingo/fibers/wiki/Manual) | shared (Boehm GC) | zero (reference) | programmer | **yes — work stealing across per-core schedulers** |
+| [CPython 3.14 free-threading](https://peps.python.org/pep-0703/) | shared | zero (reference) | per-object locks + biased refcounting | threads are OS threads |
+
+**The copy-at-boundary family (where this KEP sits).** Erlang is the
+existence proof that per-process heaps + copied messages scale to
+million-process systems; the [BEAM's own
+retrospective](https://www.erlang.org/blog/message-passing/) frames copying
+as the *enabler* of pauseless-in-practice GC, not a compromise. Its three
+refinements after 25 years of production are instructive: (1) large
+binaries (>64 bytes) live in a **process-independent refcounted heap** and
+cross by reference; (2) an
+[`off_heap` message-queue mode](https://www.erlang.org/doc/system/eff_guide_processes.html)
+lets senders allocate messages outside the receiver's heap to cut lock
+contention — structurally the same move as this KEP's envelopes; (3)
+literals are shared read-only. [Racket
+places](https://users.cs.northwestern.edu/~robby/pubs/papers/dls2010-tsffd.pdf)
+(DLS 2011) is the closest published relative — separate VM instances per OS
+thread, channels carrying copied immutable data — and its escape hatch
+(`shared-flvector`/`shared-bytes`: mutable flat numeric data visible to all
+places) marks exactly where copy-semantics pinches first: big flat numeric
+arrays. [Dart 2.15](https://medium.com/dartlang/dart-2-15-7e7a598e508a)
+kept isolate *semantics* but moved isolates of a group onto one physical
+heap, so `Isolate.exit` can hand the entire result graph to the parent in
+constant time instead of copying.
+
+**The static-isolation family.** [Pony's
+ORCA](https://www.ponylang.io/media/papers/OGC.pdf) (OOPSLA 2017) and
+[Swift's region-based isolation](https://www.massicotte.org/concurrency-swift-6-se-0414/)
+(SE-0414/SE-0430, shipped in Swift 6, 2024) get zero-copy messaging by
+proving statically that the sender cannot touch the value after sending —
+via reference capabilities and control-flow region analysis respectively.
+Microsoft's [Verona / Behaviour-Oriented
+Concurrency](https://microsoft.github.io/verona/publications.html)
+(OOPSLA 2024) is the current research frontier of the same idea (isolated
+regions + `when` behaviours, data-race- and deadlock-free by construction),
+now being retrofitted to Python as
+[Pyrona](https://microsoft.github.io/verona/pyrona.html). None of this
+transfers to a dynamically-typed R7RS Scheme: without a type system to
+carry the proof, "sender no longer uses it" cannot be checked, so the
+runtime copy is what remains.
+
+**The shared-heap family, and what it costs.** [OCaml
+5](https://arxiv.org/abs/2004.11663) (ICFP 2020) is the best-documented
+retrofit: roughly a decade from Multicore OCaml's start to release,
+centered on a mostly-concurrent major GC with stop-the-world parallel minor
+collections. [CPython's free-threading](https://peps.python.org/pep-0703/)
+(PEP 703, officially supported in 3.14, October 2025) replaced the GIL with
+biased refcounting plus per-object locks at the cost of ~5–10%
+single-thread overhead and a multi-year ecosystem migration
+([PEP 779](https://peps.python.org/pep-0779/) targets default-on toward the
+end of the decade). Two datapoints cut the other way and are worth naming:
+**Kotlin/Native launched with an isolation model** (only *frozen* object
+graphs could cross threads) **and abandoned it** in 1.7.20 for a shared
+heap with a tracing GC, because freezing was too restrictive in practice
+([migration guide](https://kotlinlang.org/docs/native-migration-guide.html))
+— an ergonomics warning this KEP answers with transparent promotion rather
+than a new type and a new failure mode. And [Guile
+fibers](https://wingolog.org/archives/2017/06/29/a-new-concurrent-ml) — the
+nearest neighbor, a Concurrent-ML library for the other major R7RS-adjacent
+Scheme — runs one scheduler per core **with work stealing of fibers across
+cores**, which is only possible because Guile sits on a shared
+(Boehm-Demers-Weiser) heap; even so, its manual notes allocation scaling is
+sub-linear across NUMA nodes. That contrast is the clearest justification
+for this KEP's no-migration stance: fiber migration is a shared-heap
+feature, and Kaappi's isolated heaps are the deliberate foundation of its
+lock-free primitive layer.
+
+**Lessons folded into this design, and future levers it leaves open:**
+
+1. *Envelopes off the receiver's heap* mirror BEAM's `off_heap` strategy —
+   senders never contend on receiver-heap allocation (§1, §4).
+2. *Erlang's refcounted binary heap* suggests the natural first
+   copy-elision: large **immutable** payloads (bytevectors, strings) could
+   cross by refcounted reference without breaking the no-shared-mutable
+   invariant. Folded into Unresolved question 1 as the measured escape
+   hatch, alongside the immediate fast path.
+3. *Dart's `Isolate.exit`* suggests a heap-adoption optimization for
+   `thread-join!`: Kaappi's heaps are non-moving linked object lists, so a
+   dying child's *entire heap* could in principle be spliced into the
+   parent's GC (re-stamping `Object.owner`) instead of deep-copying the
+   result — O(live objects) re-stamping versus O(result size) copying, a
+   win when the result *is* most of the heap. Noted as a Phase 7 candidate,
+   not a commitment.
+4. *Racket's shared flat vectors* mark the pressure point (numeric arrays)
+   to watch for in `parallel-map` workloads before inventing any
+   shared-memory type.
+5. *WebAssembly's
+   [shared-everything-threads](https://github.com/WebAssembly/shared-everything-threads)
+   proposal* (in active development, 2025–2026) may eventually give the
+   WASM target real threads; the notifier abstraction should keep its
+   backend pluggable rather than assume WASI stays single-threaded forever.
+
 ## Cross-platform / compatibility impact
 
 - **Platforms.** kqueue `EVFILT.USER` (macOS/BSD) and `eventfd` (Linux
@@ -672,9 +781,13 @@ thousands of connections*.
 1. **Envelope cost.** Is a GC struct per message acceptable for small hot
    messages (fixnums, short strings)? Phase 1 lands a
    `channel-send`/`channel-receive` cross-thread micro-benchmark; Phase 7
-   decides whether the envelope backing becomes a reusable arena. Immediates
-   could also skip the envelope entirely (a fixnum needs no heap) — decide
-   with the benchmark in hand.
+   decides whether the envelope backing becomes a reusable arena. Two
+   copy-elision levers to evaluate with the benchmark in hand: immediates
+   can skip the envelope entirely (a fixnum needs no heap), and large
+   **immutable** payloads (bytevectors, strings) could cross by refcounted
+   reference in a process-wide side heap — BEAM's proven design for >64-byte
+   binaries (see Prior art) — without breaking the no-shared-mutable
+   invariant.
 2. **Deadlock heuristic precision.** "Other live threads exist" is coarse:
    a single-purpose child that provably holds no reference to the channel
    still suppresses local deadlock errors elsewhere. Is per-channel
