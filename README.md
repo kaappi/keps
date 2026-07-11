@@ -43,7 +43,7 @@ Withdrawn   Rejected / Superseded
 
 | KEP | Title | Status | Target |
 |----:|-------|--------|--------|
-| [0001](keps/0001-event-loop-reactor.md) | Event-Loop Reactor for Fiber I/O | Draft | `kaappi` core |
+| [0001](keps/0001-event-loop-reactor.md) | Event-Loop Reactor for Fiber I/O | Accepted | `kaappi` core |
 
 ## License
 
