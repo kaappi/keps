@@ -226,14 +226,19 @@ pub const Reactor = struct {
 
 const Reg = struct {
     fd: i32,
-    read_waiter:  ?*Fiber = null,        // at most one per direction (Go netpoller model)
-    write_waiter: ?*Fiber = null,
+    read_waiters:  std.ArrayListUnmanaged(*Fiber) = .{},   // usually length 1
+    write_waiters: std.ArrayListUnmanaged(*Fiber) = .{},
 };
 ```
 
 The fd→fiber indirection lives in `regs`; the OS is handed the **fd** (kqueue
 `udata`, epoll `data.fd`, wasi `userdata`) rather than a raw pointer, so a
 collected/moved fiber can never be dereferenced from a stale kernel event.
+Readiness wakes **every** waiter on the fd's direction; losers of the retry
+race simply re-park — the same wake-all discipline `wakeChannelWaiters`
+([`fiber.zig:292`](https://github.com/kaappi/kaappi/blob/488eaed2/src/fiber.zig#L292))
+already uses for channels, with the same safety argument (resolved question 1).
+This also permits several acceptor fibers to park on one listen fd.
 
 ### 2. Backends
 
@@ -252,10 +257,12 @@ backends call the raw APIs directly:
   The wait `timespec` is computed from the nearest timer.
 - **epoll (Linux):** `std.os.linux.epoll_create1`, `epoll_ctl`, `epoll_wait`.
   `events = EPOLL.IN (0x1) / EPOLL.OUT (0x4) | EPOLL.ONESHOT (1<<30)`,
-  `data.fd = fd`. `epoll_wait`'s timeout is `i32` **milliseconds**; for
-  sub-millisecond timer precision, arm a `timerfd_create`/`timerfd_settime` fd
-  to the nearest deadline and register it like any other fd (v1 may accept ms
-  granularity).
+  `data.fd = fd`. `epoll_wait`'s timeout is `i32` **milliseconds**; v1 accepts
+  ms granularity with ceil-rounding (resolved question 2). Should a workload
+  ever need sub-millisecond deadlines, the escape hatch is a
+  `timerfd_create`/`timerfd_settime` fd armed to the nearest deadline and
+  registered like any other fd (Zig 0.16 wraps `epoll_pwait` but not the
+  nanosecond-timespec `epoll_pwait2`).
 - **WASI (`poll_oneoff`):** build a `subscription_t[]` — one `fd_read`/`fd_write`
   per registration plus one `CLOCK` subscription (ABSTIME) at the nearest
   deadline — call `std.os.wasi.poll_oneoff`, and match returned
@@ -342,9 +349,13 @@ KEP depends on and makes explicit. Per-fiber memory is the related, harder
 constraint: `allocFiber` (`memory.zig:826`) preallocates the full register and
 frame arrays (`INITIAL_REGISTER_CAPACITY` = 2048 registers × 8 B alone is
 16 KiB, plus 480 frames), and `saveCurrentFiber` grows every fiber toward the
-largest VM high-water mark. Thousands of fibers at tens of KiB each is
-workable but not free; sizing policy is an unresolved question (§Unresolved,
-Q5).
+largest VM high-water mark — and memcpys the full register file on every
+switch. The sizing direction is decided (resolved question 5): fibers start
+small and `saveCurrentFiber`/`restoreFiber` copy only the live register
+window — the span `markFiberState` already computes per frame via
+`frameWindow()`
+([`types.zig:521`](https://github.com/kaappi/kaappi/blob/488eaed2/src/types.zig#L521))
+— with the magnitude measured in Phase 7.
 
 ### 4. I/O primitive changes
 
@@ -398,6 +409,13 @@ buffered prefix. Regular-file semantics are unaffected (files never return
 every `write-char`/`write-u8` is its own syscall — and would be its own reactor
 registration. A per-port `write_buf` flushed on `flush-output-port` (currently a
 no-op at `primitives_io.zig:792`) or when full makes async writes efficient.
+
+**Close discipline.** `close-port` (`primitives_io.zig:308`) closes the raw
+fd unconditionally today. Once ports can be registered, it must first
+unregister the fd from the reactor and wake any parked waiters — which then
+retry, observe `is_open == false`, and raise a clean "port closed" error
+instead of hanging forever. Debug builds assert that `register()` never finds
+a stale registration for its fd (resolved question 4).
 
 **Supersede the dead helpers.** The reactor obsoletes `set-nonblocking` /
 `poll-read` / `nb-accept` in `kaappi-net`; they remain for compatibility but are
@@ -454,8 +472,8 @@ server) work **unchanged** once the port layer is reactor-aware.
   benefit until their separate rework lands, so "fibers for I/O" is only fully
   true for plain TCP at first.
 - **Fiber footprint.** Lifting `MAX_FIBERS` exposes the per-fiber
-  preallocation cost (§3); without a sizing-policy change, 10k fibers cost
-  hundreds of MB of register/frame arrays.
+  preallocation cost (§3); the live-window sizing direction (resolved
+  question 5) addresses it, pending Phase 7 measurement.
 - **WASI is best-effort.** Socket readiness depends on host support.
 
 ## Alternatives considered
@@ -498,29 +516,63 @@ server) work **unchanged** once the port layer is reactor-aware.
 
 ## Unresolved questions
 
-1. **Two fibers blocked on one fd.** `Reg` holds one waiter per direction (Go
-   model). Do we error, or serialize the second reader behind the first?
-   (Recommendation: serialize or raise a clear error — never silently overwrite
-   a waiter, which would lose a wakeup.)
-2. **Timer precision on Linux v1.** Accept `epoll_wait` millisecond granularity,
-   or add `timerfd` immediately for nanosecond deadlines?
-3. **Level-triggered vs ONESHOT for v1.** ONESHOT matches one-waiter-per-direction
-   naturally but re-arms on every block; plain level-triggered is simplest.
-   Benchmark both.
-4. **Fd-reuse hardening.** Is fd-keyed `regs` plus delete-before-close
-   sufficient, or do we need tokio/mio-style token+generation indirection from
-   the start?
-5. **Per-fiber memory sizing.** With `MAX_FIBERS` lifted (§3), each fiber still
-   preallocates full register/frame arrays and grows to the VM's high-water
-   mark. Options: much smaller initial capacities for spawned fibers (growth
-   machinery already exists in `saveCurrentFiber`/`restoreFiber`), or saving
-   only the live register window on suspend. Needs measurement; affects
-   whether "thousands of connections" is tens of MB or hundreds.
+All five questions in the accepted draft were resolved on 2026-07-11. The
+decisions are recorded here and folded into the design sections above; the
+only remaining open item is a measurement, owned by Phase 7.
 
-Two questions from earlier drafts are now resolved and folded into the design:
-the Zig 0.16 errno helpers (§2, verified: `std.posix.errno` /
-`std.os.linux.errno`) and the `(read)`-on-sockets buffer redesign (§4,
-superseded by the incremental parser shipped in `47b8e748`).
+1. **Two fibers blocked on one fd — resolved: multiple waiters, wake-all.**
+   `Reg` holds a (usually length-one) waiter list per direction; readiness
+   wakes every waiter, and losers of the retry race re-park via the
+   `yield_retry` protocol — the same wake-all discipline `wakeChannelWaiters`
+   ([`fiber.zig:292`](https://github.com/kaappi/kaappi/blob/488eaed2/src/fiber.zig#L292))
+   already uses for channels, with the same safety argument. This also
+   permits multiple acceptor fibers on one listen fd, which single-waiter or
+   raise-an-error semantics would forbid. Wake-head-only FIFO is a drop-in
+   refinement if Phase 7 profiling ever shows thundering-herd cost.
+2. **Timer precision on Linux v1 — resolved: ms with ceil-rounding.**
+   `epoll_wait` millisecond granularity is accepted; timeouts round **up**,
+   so a timer may fire ≤1 ms late but never early, and expiry is decided by
+   comparing `clockNs()` against the heap — never by assuming the wait ran
+   its full length (an early fd event must not expire timers prematurely).
+   SRFI-18 expresses timeouts in floating seconds; nothing in the tests or
+   ecosystem depends on sub-ms timing. Zig 0.16 wraps `epoll_pwait` (still
+   ms) but not `epoll_pwait2`, so sub-ms precision would mean `timerfd` (§2)
+   — added only if a real workload asks. macOS is exact regardless (kqueue
+   takes a `timespec`); the ≤1 ms cross-platform skew is acceptable.
+3. **Level-triggered vs ONESHOT — resolved: ONESHOT.** ONESHOT *is*
+   level-triggered delivery; the only choice is who disarms after firing.
+   Under park-and-retry, a registration should exist only while a fiber is
+   parked — ONESHOT makes that true by construction (no hot-spin on
+   unclaimed readiness, no stale events after wake; kqueue's `EV_ONESHOT`
+   deletes the knote outright). The re-arm is one `epoll_ctl`/`kevent` per
+   block cycle — noise next to the adjacent `read(2)`. Phase 7 confirms with
+   profiles rather than building both variants up front.
+4. **Fd-reuse hardening — resolved: fd-keyed is sufficient; unregister
+   before close.** tokio/mio's token+generation scheme guards against events
+   being processed concurrently with user code that closes and recycles fds.
+   Kaappi's reactor is per-OS-thread and cooperative: no Scheme or FFI code
+   runs between `poll()` returning and the status flips in
+   `runSchedulerStep`, so that race cannot occur. The required discipline is
+   unregister-before-close in `close-port` with waiter wakeup (§4), plus a
+   debug-build assertion that `register()` never finds a stale registration.
+   **Revisit trigger:** adding cross-thread wakeup (`EVFILT.USER`, §2) would
+   reintroduce the concurrency and force token indirection.
+5. **Per-fiber memory sizing — direction resolved: live-window
+   save/restore; magnitude to measure.** Shrinking initial capacities alone
+   cannot help while `saveCurrentFiber` copies `vm.registers.len` on every
+   switch; the copy must be bounded by the live span, which `markFiberState`
+   already computes per frame via `frameWindow()`
+   ([`types.zig:521`](https://github.com/kaappi/kaappi/blob/488eaed2/src/types.zig#L521)).
+   Fibers start small (~256 registers / 32 frames) with geometric growth;
+   save/restore covers `[0, max(base + window))` across live frames. Phase 7
+   measures RSS and switch time at 1k/10k fibers, and whether the
+   256-register `frameWindow()` fallback for native frames inflates windows
+   in practice.
+
+Two questions from earlier drafts were resolved during verification and are
+folded into the design: the Zig 0.16 errno helpers (§2, verified:
+`std.posix.errno` / `std.os.linux.errno`) and the `(read)`-on-sockets buffer
+redesign (§4, superseded by the incremental parser shipped in `47b8e748`).
 
 ## Implementation plan
 
@@ -534,14 +586,17 @@ into `runSchedulerStep`; park on `reactor.poll`, subsuming both
 `scheduleOrTimeout`'s whole-thread `nanosleep` and the bare channel-loop
 `break`. Fold the `deadline_ns` sweep into the timer heap; reimplement
 `thread-sleep!` as a timed park. Replace the fixed `[MAX_FIBERS]?*Fiber`
-table with a growable list. Extend `markFiberState`/`referencesYoung`; add
+table with a growable list; shrink initial per-fiber capacities and bound
+`saveCurrentFiber`/`restoreFiber` to the live register window (resolved
+question 5). Extend `markFiberState`/`referencesYoung`; add
 `Reactor.markRoots`.
 
 **Phase 3 — Port layer.** Lazy `O_NONBLOCK` on registered ports (never fd 0 in
 REPL); reactor hook in `readOneByte`; resumable port-layer writes (split from
 `reporting.zig`'s `writeToFd`); per-port write buffer with a real
 `flush-output-port`; the `EAGAIN` path in `readDatumFn` (§4 — the incremental
-parser and port-resident buffer already exist).
+parser and port-resident buffer already exist); unregister-before-close in
+`close-port` with waiter wakeup (resolved question 4).
 
 **Phase 4 — WASI backend.** `poll_oneoff` backend behind `is_wasm`, with the
 single-fiber blocking fallback.
@@ -556,5 +611,7 @@ API.
 
 **Phase 7 — Performance.** Once primitives drain correctly, evaluate migrating
 to edge-triggered (`EPOLLET`/`EV_CLEAR`) and benchmark against the
-threaded/prefork servers. Measure per-fiber memory (Unresolved Q5) at
-realistic connection counts.
+threaded/prefork servers. Measure the residuals of the resolved questions:
+per-fiber RSS and switch time after the live-window change at realistic
+connection counts (Q5), ONESHOT re-arm cost in profiles (Q3), wake-all herd
+cost on shared fds (Q1), and whether any workload motivates `timerfd` (Q2).
