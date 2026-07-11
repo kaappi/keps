@@ -5,7 +5,7 @@
 | **KEP** | 0001 |
 | **Title** | Event-Loop Reactor for Fiber I/O |
 | **Author** | Baiju Muthukadan <baiju.m.mail@gmail.com> |
-| **Status** | Draft |
+| **Status** | Accepted |
 | **Type** | Standards |
 | **Target** | `kaappi` core (VM/scheduler/I/O), with downstream effects on `kaappi-net`, `kaappi-http`, `kaappi-pg` |
 | **Created** | 2026-06-29 |
