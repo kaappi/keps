@@ -204,9 +204,15 @@ reservation-admitted send racing `channel-close!` can be destroyed
 unreceived after all until-EOF workers exit — §8's "tasks submitted
 before shutdown all run" fails; repair (EOF also waits for
 `reserved = 0`) verified. (3) that repair is sound only if the §4
-failure path also rings `recv_waiters` on a closed channel. Proposed
-amendment text is in the model's README. Method steps 2 (PCT stress
-harness) and 3 (GenMC escalation) remain with Phase 3.
+failure path also rings `recv_waiters` on a closed channel. **The
+amendment landed 2026-07-12** — §5 unconditional sweep, §4/§6
+reserved-aware EOF, §4 closed-channel failure ring, plus newly
+specified receive-side copy-failure semantics (re-queue at head, ring
+receivers; transient capacity overshoot documented) — every change
+model-checked before the text changed, and the nine-config suite
+(three intentionally-failing regression witnesses) is now KEP-0002's
+Phase 1 merge gate. Method steps 2 (PCT stress harness) and 3 (GenMC
+escalation) remain with Phase 3.
 
 ---
 
@@ -460,8 +466,11 @@ plain `SO_REUSEPORT` path everywhere.
 ## Follow-up work items (tracked, not part of this document's PR)
 
 1. ~~`research/tla/shared_channel.tla` — the P2 model (own PR to this
-   repo).~~ Done — see P2's status block; the open successor item is
-   the KEP-0002 §4–§6 amendment the model's findings require.
+   repo).~~ Done, and the KEP-0002 §4–§6 amendment its findings
+   required has landed — see P2's status block. Next in line for this
+   repo: the P1 constraints memo (method step 1) and the P5
+   `research/benchmarks/` spec; KEP-0002 Phase 1 implementation moves
+   to the kaappi repo.
 2. P1 codegen/vectorization micro-benchmark — kaappi repo (needs the
    LLVM backend).
 3. P3 envelope A/B/C/D harness — kaappi repo, part of KEP-0002 Phase 1.

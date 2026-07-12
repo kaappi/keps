@@ -31,7 +31,7 @@ configs=("$@")
 if [ ${#configs[@]} -eq 0 ]; then
   configs=(core_cap1_flipall core_cap4_flipall core_cap4_selective
            strand_flipall strand_waitres core_cap4_waitres_naive
-           core_cap1_waitres)
+           core_cap4_waitres core_cap1_recvfail core_cap1_waitres)
 fi
 
 rc=0

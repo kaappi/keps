@@ -280,6 +280,20 @@ Four invariants the whole design preserves:
    completes and carries the release/acquire edge for every
    promotion-time write.
 
+**The §§4–6 protocol is machine-checked.** `research/tla/shared_channel.tla`
+(in this repository; P2 of
+[`research/open-problems.md`](../research/open-problems.md)) models
+promotion, send/receive, close, and the notifier protocol against six
+pre-registered safety/liveness properties, and the suite
+(`research/tla/run.sh`) is re-run whenever this KEP's pseudocode changes
+— amendment first, code second. Three protocol bugs the model found on
+2026-07-12 — a lost wakeup from filtering the sweep by readiness, an
+admitted send abandoned across close, and receivers stranded by the
+copy-failure path — are repaired in the current text (§5's unconditional
+sweep; §4 receive step 6's `reserved == 0` guard; §4 step 9's
+closed-channel ring), and the rejected variants are kept in the model as
+regression witnesses.
+
 ### 1. The shared-object protocol; `SharedChannel` and envelopes (new `src/shared_object.zig`, `src/shared_channel.zig`)
 
 **The shared-object protocol.** Channels are the first of (at least) two
@@ -570,11 +584,12 @@ copy today) and buys three things:
  8. unlock
  9. build envelope (deepCopy the payload)
       on failure: lock; reserved -= 1; snapshot-and-clear send_waiters
-      (the slot reopened); unlock; ring the snapshot; envelope.deinit()
-      — which releases, via freeObject, every stub refcount the partial
-      copy took (§1); raise. Nothing was enqueued: "send fails ⇒ nothing
-      sent" holds, though promotion of reachable channels is sticky (§2,
-      Drawbacks).
+      (the slot reopened) — and recv_waiters too if closed: a receiver
+      may be parked waiting out this very reservation (receive step 6);
+      unlock; ring the snapshots; envelope.deinit() — which releases,
+      via freeObject, every stub refcount the partial copy took (§1);
+      raise. Nothing was enqueued: "send fails ⇒ nothing sent" holds,
+      though promotion of reachable channels is sticky (§2, Drawbacks).
 10. lock
 11.   reserved -= 1; push envelope; snapshot-and-clear recv_waiters
 12. unlock
@@ -597,9 +612,13 @@ lock may find, back at step 10, that a concurrent `channel-close!` has
 closed the channel in the interim — the push still proceeds, and the
 message is delivered through close's drain-then-EOF rule (§6). "Close
 stops sends" therefore means precisely: no send is *admitted* after
-close; a send already admitted is never failed after its copy work and
-its message is never lost. (The sender's own stub holds a refcount, so
-the channel cannot be destroyed while its send is in flight.)
+close; a send already admitted is never failed after its copy work, and
+its message is never lost *or abandoned* — receivers return eof only
+once `reserved == 0` (receive step 6), so an admitted message is always
+enqueued, and drained by any receiver still looping, before
+end-of-stream is observable (model finding 2). (The sender's own stub
+holds a refcount, so the channel cannot be destroyed while its send is
+in flight.)
 
 `channel-receive` mirrors it:
 
@@ -609,8 +628,25 @@ the channel cannot be destroyed while its send is in flight.)
  3.       pop envelope; snapshot-and-clear send_waiters (a slot opened)
  4.       unlock; ring the snapshot; deepCopy out into own heap;
  5.       envelope.deinit(); return the value
- 6.   if closed: unlock → return (eof-object)                       (§6)
- 7.   register own ThreadNotifier in recv_waiters (dedup)
+          on copy failure: lock; push the envelope back at the queue
+          head (FIFO preserved — the failed receive never happened);
+          snapshot-and-clear recv_waiters; unlock; ring; raise.
+          "Receive fails ⇒ nothing received": the envelope is untouched,
+          its stubs keep their refcounts, the message stays deliverable
+          in order, and the ring re-wakes receivers that parked while
+          the queue was momentarily empty. (Partial copy-out garbage on
+          the receiver's heap is unrooted and collects normally,
+          releasing any stub refcounts it took via freeObject.) One
+          consequence: the pop's ring may already have admitted a
+          sender into the freed slot, so a bounded queue can
+          transiently exceed its capacity by the number of concurrently
+          failing receives — admission (step 3 of send) remains strict,
+          and the overshoot drains with the next receive.
+ 6.   if closed and reserved == 0: unlock → return (eof-object)     (§6)
+ 7.   register own ThreadNotifier in recv_waiters (dedup) — reached
+      with the channel open, or closed with admitted sends still in
+      flight: eof must not race a reservation, so the receiver parks
+      and is rung by the late push (or by step 9's failure ring)
  8. unlock → park (.waiting on the stub, yield_retry rewind —
     [primitives_fiber.zig:183])
 ```
@@ -619,7 +655,10 @@ Both waiter snapshots are taken **under the lock** and rung after release
 — a live waiter list is never iterated unlocked. Wake policy is
 **wake-all** on both sides, matching every existing wake discipline in the
 runtime ([`fiber.zig:347`](https://github.com/kaappi/kaappi/blob/54706a0c/src/fiber.zig#L347)):
-losers of the retry race re-park; the mutex-guarded pop and
+losers of the retry race re-park **and re-register** — the §5 sweep
+flips parked waiters unconditionally precisely so that losers get to
+run and restore the registration their ring consumed (model finding 1);
+the mutex-guarded pop and
 reservation-backed push make delivery and enqueue exactly-once. FIFO holds
 per channel with respect to *completed* sends: a reservation is not yet an
 enqueue, so two racing senders' order is decided at step 11 (they had no
@@ -678,10 +717,27 @@ while (notifier.wake_pending.swap(false, .acq_rel)) sweepSharedWaiters();
 // swept by the loop. No interleaving loses a wakeup.
 ```
 
-`sweepSharedWaiters` flips to `.suspended` every fiber on the scheduler's
-**shared-waiter registry** whose channel is ready *for it*: non-empty
-queue for a receiver, free slot for a parked sender, or `closed` for
-either. The registry is a per-scheduler list that a fiber joins when it
+`sweepSharedWaiters` flips to `.suspended` **every** fiber on the
+scheduler's **shared-waiter registry** — unconditionally. Filtering the
+sweep by per-channel readiness ("non-empty queue for a receiver, free
+slot for a sender") looks like an obvious optimization and is unsound:
+rings snapshot-and-clear the waiter lists (§4, §6), so a fiber that was
+rung but lost the retry race to a faster thread has no registration
+left; if the sweep also declines to flip it, nothing ever will — later
+sends ring a list its thread is no longer on, and even `channel-close!`
+wakes only registered notifiers (model finding 1: a permanent hang,
+found as a 25-step counterexample). Flipping unconditionally makes the
+§4 wake-all discipline literal: woken fibers retry their primitive,
+and losers re-park and re-register under the lock. The cost is spurious
+retries bounded by the registry length — acceptable because the
+registry holds only shared-channel waiters (below), and in the §9
+server topology shared channels stay off the hot path. (The two
+targeted alternatives — registrations that persist until a fiber is
+actually flipped, or a sweep that re-registers unready fibers — buy
+back the spurious retries at the price of taking channel locks from
+the sweep and rewriting §7's lifecycle rules; rejected for v1, revisit
+only if Phase 7 measures registry-storm retries.)
+The registry is a per-scheduler list that a fiber joins when it
 parks on a promoted channel and leaves when the sweep flips it (or its
 timeout removes it); it is owned and mutated only by the scheduler's own
 thread, so it needs no lock, and it holds fiber pointers, not heap
@@ -786,8 +842,14 @@ fiber-only backpressure stays on the lock-free path.
   the message is delivered — reservation-as-admission (§4), so close
   never fails a send after its copy work and never loses an admitted
   message. **Receivers** drain the remaining queue first — including
-  late reservation-admitted pushes, which §4's receive ordering handles
-  naturally (the queue check precedes the closed check) — then return
+  late reservation-admitted pushes: the queue check precedes the closed
+  check, and eof additionally requires `reserved == 0` (§4 receive
+  step 6), so a receiver that arrives inside an admitted send's copy
+  window parks and is rung by the late push (or by the failure path's
+  closed-channel ring, §4 step 9) instead of returning a premature
+  end-of-stream that would abandon the admitted message (model
+  finding 2; the local path has no reservation window and is
+  unaffected) — then return
   `(eof-object)`, the same end-of-stream convention as ports, so the
   worker-loop idiom needs no sentinel protocol:
   `(let loop ((x (channel-receive ch))) (unless (eof-object? x) … (loop (channel-receive ch))))`.
@@ -883,7 +945,12 @@ Shutdown semantics fall out of §6's close protocol rather than sentinel
 messages: `pool-shutdown!` closes the task channel (waking all idle
 workers at once), each worker finishes its current task, drains any
 still-queued tasks, exits on `(eof-object)`, and is joined. Tasks
-submitted before shutdown all run and their replies stay receivable;
+submitted before shutdown all run and their replies stay receivable —
+including a submit that *races* the shutdown: reservation-as-admission
+(§4) plus the `reserved == 0` eof rule (§6) guarantee that a task
+admitted before the close is drained by some worker before any worker
+sees end-of-stream (model finding 2 showed the pre-amendment protocol
+silently dropping exactly such a task, hanging its `task-wait`);
 `pool-submit` after shutdown raises the closed-channel error.
 
 `parallel-map` / `parallel-for-each` chunk the input, submit, and reassemble
@@ -1229,6 +1296,9 @@ Everything testable on one thread (promote, send, receive,
 channel-in-channel, refcount teardown, failed-send atomicity, and
 re-entrant promotion — promoting a channel whose own queue contains it,
 §2 step 2), plus the local fast-path benchmark (invariant 3's gate).
+Merge gate: the P2 model suite (`research/tla/run.sh` in the KEPs repo)
+stays green; any §4–§6 pseudocode change re-runs it first — amendment
+before code.
 
 **Phase 2 — Envelopes at thread boundaries.** `thread-start!` copies the
 thunk into an envelope parent-side (closing the concurrent-copy race);
@@ -1247,6 +1317,9 @@ shared-waiter registry and the `wake_pending`
 swap-loop protocol at both wake-check sites (§5); refcount-aware deadlock
 semantics including the main-fiber blocking path; notifier teardown.
 Regression test: park locally → promote → remote send wakes (§2).
+Second regression: a rung receiver that loses the pop race re-parks,
+re-registers, and is woken by the next ring — the unconditional-sweep
+guarantee (§5, model finding 1).
 Multi-thread stress tests (N producers / M consumers × waiter churn ×
 `-Dgc-stress=true`), plus the kaappi#1455 mutex/condvar suite re-run to
 confirm no interaction.
@@ -1257,10 +1330,16 @@ local-side); timeout/timeout-val on **both** `channel-send` and
 `channel-receive` via the reactor timer heap; `channel-close!` /
 `channel-closed?` with drain-then-EOF receive semantics and wake-all;
 the local-channel `capacity`/`closed` fields and `dequeueChannel` wake
-(§6); the eof-object send rejection (§6). Required interleaving test:
-reserve → concurrent close → push
-completes and the message is drained before EOF
-(reservation-as-admission, §4).
+(§6); the eof-object send rejection (§6). Required interleaving tests
+from the model: reserve → concurrent close → push completes and the
+message is drained before EOF (reservation-as-admission, §4); all
+until-eof workers racing a reserved send across close — the admitted
+task is drained, not destroyed (§6 `reserved == 0` eof rule,
+finding 2); copy failure of the last reserved send on a closed channel
+— the failure ring wakes eof-waiting receivers (§4 step 9, finding 3);
+and a failed receive re-queues at the head with the message redelivered
+in order (§4 receive step 5), including the transient capacity
+overshoot on a bounded channel.
 
 **Phase 5 — `(kaappi parallel)`.** The library (pool, submit, wait,
 parallel-map/for-each, shutdown), the `processor-count` primitive, WASM
