@@ -47,7 +47,8 @@ explicitly deferred.
 On top of this single primitive, a new pure-Scheme `(kaappi parallel)`
 library provides worker pools and `parallel-map`, and `kaappi-http` gains a
 multi-core server mode: N OS threads, each running its own fiber scheduler
-and reactor, load-balanced by the kernel via `SO_REUSEPORT`. Fibers do
+and reactor, load-balanced by the kernel via `SO_REUSEPORT` on Linux
+(Darwin needs a userspace fallback — §9). Fibers do
 **not** migrate between threads — multi-core fiber scheduling here means
 *N independent schedulers connected by channels*, not a work-stealing runtime
 (see Alternatives for why).
@@ -197,7 +198,9 @@ channel permanently swaps its lock-free local queue for a mutex-protected
 shared one), so don't close over channels you want to keep on the fast
 path. Second, streams have a first-class ending:
 `(channel-close! ch)` wakes all waiters, later receives drain what's
-queued and then return `(eof-object)` — no sentinel-message protocols.
+queued and then return `(eof-object)` — no sentinel-message protocols
+(and, to keep that ending unambiguous, *sending* an eof-object is an
+error — §6).
 
 **Worker pools become a library, not a project.** The new pure-Scheme
 `(kaappi parallel)` library packages the pattern:
@@ -216,8 +219,9 @@ queued and then return `(eof-object)` — no sentinel-message protocols.
 ```
 
 **Multi-core HTTP serving** composes this with KEP-0001's fiber server:
-N threads each run `http-listen-fiber` on a `SO_REUSEPORT` socket, so the
-kernel load-balances accepts and each core multiplexes thousands of
+N threads each run `http-listen-fiber` on a `SO_REUSEPORT` socket, so
+accepts are load-balanced (by the kernel on Linux; see §9 for the Darwin
+caveat) and each core multiplexes thousands of
 connections on its own reactor:
 
 ```scheme
@@ -257,17 +261,24 @@ Four invariants the whole design preserves:
 2. **No thread ever mutates another thread's fiber or scheduler state.**
    Cross-thread wakeup only *rings a doorbell*; the woken thread flips its
    own fibers' statuses.
-3. **The single-thread fast path is untouched.** An unpromoted channel is
-   exactly today's `head`/`tail` pair queue plus one pointer null-check.
-4. **Promotion is one-way and atomic; no mixed-mode channel ever exists.**
-   `shared` is written exactly once, by the owning thread, only after the
-   local queue has been drained and local waiters migrated (§2), and a
-   promoted channel never demotes. No interleaving can observe a
-   half-promoted channel: local-channel operations on the owning thread
-   are serialized by cooperative fiber scheduling (promotion runs inside a
-   primitive, which has no fiber switch points), and no other thread can
-   reach the channel before the publishing release store — the stub first
-   escapes through the very `deepCopy` that triggered the promotion.
+3. **The single-thread fast path stays lock-free and allocation-identical.**
+   An unpromoted channel is today's `head`/`tail` pair queue plus one
+   pointer null-check and the §6 capacity/closed tests — three predictable
+   branches, no locks, no atomics. "Unmeasurable" is a Phase 1 benchmark
+   gate, not an assumption.
+4. **Promotion is one-way and atomic; no mixed-mode channel is ever
+   observable.** `shared` is written exactly once, by the owning thread,
+   *before* the local queue is drained — early publication is what makes
+   promotion re-entrancy-safe (§2 step 2) — and a promoted channel never
+   demotes. No interleaving can observe a half-promoted channel:
+   local-channel operations on the owning thread are serialized by
+   cooperative fiber scheduling (promotion runs inside a primitive, which
+   has no fiber switch points), and no other thread can reach the channel
+   until the stub escapes through the very `deepCopy` that triggered the
+   promotion — a hand-off (envelope push under the channel mutex, or
+   `Thread.spawn` for a thunk) that happens strictly after promotion
+   completes and carries the release/acquire edge for every
+   promotion-time write.
 
 ### 1. `SharedChannel` and envelopes (new `src/shared_channel.zig`)
 
@@ -311,7 +322,9 @@ guard (`no_collect`,
 instead of re-implementing a serializer that would have to duplicate all of
 it. Symbols re-intern through the shared table
 ([`gc_deep_copy.zig:70`](https://github.com/kaappi/kaappi/blob/54706a0c/src/gc_deep_copy.zig#L70)),
-so they cost one lookup, not a copy. A GC struct per message is not free;
+so they cost one *mutex-guarded* lookup, not a copy — with many threads
+exchanging symbol-heavy messages (every record carries its type-name
+symbol) the table lock is a contention point Phase 7 measures. A GC struct per message is not free;
 measuring it — and replacing it with a reusable arena if it shows up — is
 Phase 7's job (Unresolved question 1).
 
@@ -340,6 +353,22 @@ rc 1 → 0 and the `SharedChannel` is destroyed. A message that is never
 received dies with the channel: destroy-at-zero deinits the queued
 envelope, releasing the rc it held.
 
+**Known limitation — reference counting does not collect cycles.** An
+envelope stub holds a refcount, so a queued-but-never-received message
+that (transitively) contains a stub of the very channel it is queued on
+pins that channel forever: after `(channel-send ch ch)`, `ch`'s refcount
+can never reach zero even once every thread-local stub is collected —
+the last reference is the stub inside `ch`'s own queue. Two channels
+queued in each other leak the same way. This is the classic
+refcount-cycle leak, accepted rather than solved (Unresolved question 6
+revisits with usage data), and bounded in practice by the drain
+discipline: a cycle forms only through a message that is *never*
+received, and the close-then-drain idiom (§6, §8) consumes queues before
+handles are dropped. The unit suite's leak checking treats an
+undestroyed `SharedChannel` at process exit as a failure, so accidental
+cycles are loud in tests; the guide documents the rule ("don't abandon a
+channel that has itself in flight").
+
 ### 2. Promotion: one channel type, two representations
 
 `types.Channel` gains one field:
@@ -358,22 +387,35 @@ channel** (`ch.header.owner == gc.id`, which makes it race-free: no other
 thread may legally touch an unpromoted channel) — does four things, in
 order:
 
-1. allocates the `SharedChannel` with `refcount = 1` (§1 state machine);
-2. drains any queued local values into envelopes in FIFO order, clearing
-   `head`/`tail`, and carries over `capacity`/`closed` (§6);
-3. **migrates pre-existing local waiters**: a fiber that parked on the
+1. allocates the `SharedChannel` with `refcount = 1` (§1 state machine),
+   carrying over `capacity`/`closed` (§6);
+2. **publishes the pointer (release store) — before the drain.** Early
+   publication is what makes promotion re-entrant-safe: a queued message
+   may contain the channel itself (`(channel-send ch (list ch))` is legal
+   today), so the drain's `deepCopy` in step 3 can meet the very channel
+   being promoted. With `shared` already set, the `.channel` arm takes
+   the ordinary alias path (stub + `refcount += 1`); were the pointer
+   published last, that re-entry would start a *second* promotion of the
+   same channel and split its queue between two `SharedChannel`s.
+   Publishing early is safe because no other thread can reach the field
+   until the triggering `deepCopy`'s result is handed off, strictly after
+   promotion completes (invariant 4);
+3. drains any queued local values into envelopes in FIFO order, clearing
+   `head`/`tail` — recursively promoting (or, per step 2, aliasing) any
+   channels inside them;
+4. **migrates pre-existing local waiters**: a fiber that parked on the
    *local* representation (`waiting_on == ch` — a receiver on the empty
    queue, or a sender on a full bounded queue) parked under the local wake
    protocol, which no remote thread can see; for each such fiber,
    `promoteChannel` registers the owning thread's own `ThreadNotifier` in
-   `recv_waiters`/`send_waiters` on its behalf, so the first remote
+   `recv_waiters`/`send_waiters` on its behalf and enrolls the fiber in
+   the scheduler's shared-waiter registry (§5), so the first remote
    send/receive rings this thread and the §5 sweep wakes them. Promotion
    runs inside a primitive on the owning thread — the local scheduler is
    quiescent — so the scan over `sched.fibers` is race-free. Without this
    step, a fiber that parked before promotion could hang forever: remote
    sends ring only *registered* notifiers ("park locally → promote →
-   remote send wakes" is a required Phase 3 regression test);
-4. publishes the pointer with a release store.
+   remote send wakes" is a required Phase 3 regression test).
 
 After promotion the heap object is a *stub*: an immutable handle whose only
 live field is `shared`.
@@ -399,13 +441,23 @@ so raw `eq?` would report `#f` for "the same channel" seen from two threads.
 `shared` pointer when both operands are promoted channels (Unresolved
 question 4 confirms the exact predicate set).
 
-**Foreign channel objects become a clean error — promoted or not.** Every
-channel primitive checks `ch.header.owner != gc.id` and raises
+**Foreign channel objects become a descriptive error — promoted or not.**
+Every channel primitive checks `ch.header.owner != gc.id` and raises
 `"channel belongs to another thread; pass it through the thread thunk to share it"`.
 The **only** legal cross-thread handle is a locally owned stub created by
-`deepCopy` (through a thread thunk or a message). This converts Motivation
-Path 2 from silent memory corruption into an error with the fix in the
-message. An earlier draft blessed *promoted* stubs reached through the
+`deepCopy` (through a thread thunk or a message). Scope the claim
+honestly: the check itself reads the foreign object's header, so it
+converts Motivation Path 2 into a clean error only **while the object is
+live**. If the owner drops its last reference and its GC frees the
+channel — or the owning thread exits and its heap is torn down — a
+foreign access through the stale global is still a use-after-free. That
+residual hole is a property of the globals-aliasing model itself, which
+remains unsound for *every* heap value reached through it (strings and
+vectors as much as channels); fixing it is a globals-model change, out of
+scope here (kaappi#1455 covers mutex/condvar only). What this KEP
+guarantees is narrower and real: the common mistake — a live channel
+reached through a shared global — gets a diagnosis and a fix suggestion
+instead of silent corruption. An earlier draft blessed *promoted* stubs reached through the
 shared globals map; that was wrong — not because reads race (the `shared`
 field is write-once-before-spawn on a non-moving heap, and a foreign
 reader touches no other byte of the object), but because of **lifetime**:
@@ -439,7 +491,9 @@ copy today) and buys three things:
   mutexes and condvars, are uncopyable and error out of the graph before
   any question of tearing arises). No caller-side synchronization is
   needed for compound updates: mutations before the call are in the
-  snapshot, mutations after it are not.
+  snapshot, mutations after it are not. The flip side of atomicity — one
+  uninterruptible copy stalls every fiber on the calling thread for its
+  duration — is priced in Drawbacks.
 
 `thread-join!`'s result path is unified the same way: the child's result
 (and exception) crosses in an envelope instead of the bespoke
@@ -582,10 +636,21 @@ while (notifier.wake_pending.swap(false, .acq_rel)) sweepSharedWaiters();
 // swept by the loop. No interleaving loses a wakeup.
 ```
 
-`sweepSharedWaiters` flips to `.suspended` every local fiber whose status
-is `.waiting` and whose `waiting_on` is a promoted channel that is ready
-*for it*: non-empty queue for a receiver, free slot for a parked sender,
-or `closed` for either. Woken fibers retry their primitive (§4); spurious
+`sweepSharedWaiters` flips to `.suspended` every fiber on the scheduler's
+**shared-waiter registry** whose channel is ready *for it*: non-empty
+queue for a receiver, free slot for a parked sender, or `closed` for
+either. The registry is a per-scheduler list that a fiber joins when it
+parks on a promoted channel and leaves when the sweep flips it (or its
+timeout removes it); it is owned and mutated only by the scheduler's own
+thread, so it needs no lock, and it holds fiber pointers, not heap
+values, so it adds no GC roots (§7). It exists to make the sweep
+O(shared-channel waiters) rather than O(all fibers): the
+`wakeChannelWaiters`-style full scan
+([`fiber.zig:347`](https://github.com/kaappi/kaappi/blob/54706a0c/src/fiber.zig#L347))
+is fine for local wakes, but a §9 server thread holds thousands of
+parked I/O fibers, and walking all of them on every cross-thread message
+would put an O(connections) scan on the messaging hot path. Woken fibers
+retry their primitive (§4); spurious
 wakes re-park. The sweep hooks into the two per-tick wake-check sites that
 already exist: `FiberScheduler.schedule()`'s expired-timer check
 ([`fiber.zig:284`](https://github.com/kaappi/kaappi/blob/54706a0c/src/fiber.zig#L284))
@@ -630,7 +695,7 @@ count as "alive, waiting".
 Three API extensions round out the model. All three work for **local**
 channels too, with their state on `types.Channel` until promotion:
 `capacity: ?u32`, `closed: bool`, and a queue-length count join the struct
-in §2, and `promoteChannel` carries them into the `SharedChannel` (step 2).
+in §2, and `promoteChannel` carries them into the `SharedChannel` (step 1).
 The local implementations need no new wake machinery — a local sender
 parks through the existing `waiting_on` protocol, and the two events that
 change what a waiter can do (`dequeueChannel` freeing a slot,
@@ -684,6 +749,15 @@ fiber-only backpressure stays on the lock-free path.
   `(eof-object)`, the same end-of-stream convention as ports, so the
   worker-loop idiom needs no sentinel protocol:
   `(let loop ((x (channel-receive ch))) (unless (eof-object? x) … (loop (channel-receive ch))))`.
+  One check keeps the sentinel unambiguous: `(eof-object)` is a
+  first-class value, and a *sent* eof-object would be indistinguishable
+  from end-of-stream at the receiver — unlike ports, whose read side can
+  never yield a data eof. `channel-send` therefore rejects it before §4
+  step 1 (one immediate-value comparison, no lock, both representations):
+  `"cannot send an eof-object on a channel; use channel-close! to end the stream"`.
+  The idiom that would naturally hit this — a port-to-channel bridge
+  looping `(channel-send ch (read-line p))` past the port's end — is
+  exactly the case the error message redirects to `channel-close!`.
   **Queued envelopes** at destroy-at-zero are deinit'd by the §1 rule
   regardless of closed state. Close is legal only through a locally owned
   handle (§2). Without first-class close, every pool and server invents
@@ -787,7 +861,7 @@ within each worker remains the fiber.
 ### 9. Multi-core HTTP (ecosystem, depends on KEP-0001 Phase 5)
 
 `kaappi-net` grows a `reuseport` option (one `setsockopt(SO_REUSEPORT)` in
-`csrc/kaappi_net.c`; supported on Linux ≥3.9 and macOS). `kaappi-http` adds:
+`csrc/kaappi_net.c`). `kaappi-http` adds:
 
 ```scheme
 (http-listen-parallel port handler)                    ; processor-count threads
@@ -795,8 +869,19 @@ within each worker remains the fiber.
 ```
 
 Each thread opens its own `SO_REUSEPORT` listen socket and runs
-`http-listen-fiber` — kernel-side accept balancing, zero fd passing, zero
-shared accept state. Shared channels are not even on the hot path here; they
+`http-listen-fiber` — zero fd passing, zero shared accept state. One
+platform caveat is load-bearing: **`SO_REUSEPORT` only balances on
+Linux.** Linux (≥3.9) hashes the connection 4-tuple across all listening
+sockets; Darwin/BSD merely *permit* the shared bind, and TCP connections
+concentrate on the most recently bound socket (FreeBSD grew
+`SO_REUSEPORT_LB` precisely because of this; macOS has no equivalent).
+Since macOS is the primary dev platform, Phase 6 starts by measuring
+per-socket accept distribution on both kernels; if Darwin skews as badly
+as its reputation, `http-listen-parallel` there falls back to a
+userspace distributor — one acceptor thread handing accepted fds (plain
+fixnums, valid process-wide) over a shared channel to workers that wrap
+them into ports locally. Linux keeps the kernel-balanced path either
+way. Shared channels are otherwise not on the hot path; they
 carry only the shutdown signal. This slots into the server-model table from
 KEP-0001's motivation as the fourth entry: *threads × fibers = cores ×
 thousands of connections*.
@@ -808,10 +893,26 @@ thousands of connections*.
   same asymptotic cost `thread-start!`/`thread-join!` already charges. Big
   read-mostly data fanned out to N workers is copied N times; a
   shared-immutable-data story is future work, not this KEP.
+- **A large send stalls its whole scheduler.** The §3 snapshot guarantee
+  exists *because* `deepCopy` runs as one native primitive with no fiber
+  switch points — so a multi-megabyte `channel-send` (or thunk copy)
+  blocks every fiber on that core, including thousands of parked server
+  connections in the §9 topology, for the duration of the copy. BEAM
+  affords copy-at-boundary semantics because it preempts on reductions; a
+  cooperative scheduler cannot. Applications chunk large payloads;
+  Phase 7's gate measures tail latency (not just throughput) under
+  concurrent large sends, and the refcounted immutable-payload lever
+  (Unresolved question 1) is the structural fix for big read-mostly data.
 - **Envelope overhead.** A GC struct per message is heavier than a malloc'd
   byte buffer. Accepted to reuse the audited `deepCopy` (correctness first);
   Phase 7 measures and, if needed, swaps the envelope backing for a reusable
   arena behind the same interface.
+- **Queued envelopes are invisible to GC accounting.** They live outside
+  every heap, so a fast producer against a slow consumer grows process
+  memory that no collection heuristic sees or reclaims — nothing pushes
+  back until the OS does. Bounded channels (§6) are the mitigation: give
+  cross-thread pipelines a capacity so producers park instead of queueing
+  without limit.
 - **`thread-start!` gets marginally slower** (one extra thunk copy) in
   exchange for deleting a real race. Thunks are typically small closures.
 - **Weakened deadlock detection** on shared channels: cross-thread deadlocks
@@ -820,6 +921,12 @@ thousands of connections*.
   notifier lifetimes are exactly the kind of manual protocol the GC
   otherwise spares us; the teardown discipline in §7 plus gc-stress
   thread-churn tests are the containment.
+- **Refcount cycles leak.** A never-received message containing (a stub
+  of) the channel it is queued on — `(channel-send ch ch)` — pins the
+  `SharedChannel` forever (§1). Accepted: a cycle requires abandoning a
+  channel with itself in flight, leak checking makes it loud in tests,
+  and Unresolved question 6 holds the door open for a detector if real
+  programs hit it.
 - **Promotion is sticky and can be incidental.** Any channel reachable
   from a sent value (including via closure capture) is promoted as a
   `deepCopy` side effect — even if the send subsequently fails — and never
@@ -992,12 +1099,17 @@ lock-free primitive layer.
   (documented).
 - **Sandbox mode.** SRFI-18 thread creation stays blocked; same degradation
   as WASM.
-- **Backward compatibility.** Strictly additive at the API level.
-  Single-thread fiber programs: no semantic or measurable performance
-  change. Thread thunks that capture channels: used to error, now work.
-  Channels reached via shared globals from a child: used to be silent
-  memory corruption (Motivation), now a descriptive error — a behavior
-  change only in the sense that undefined behavior became defined.
+- **Backward compatibility.** Additive at the API level with one
+  carve-out: sending a literal `(eof-object)` down a channel — previously
+  legal and meaningless — becomes an error, because §6 gives eof the
+  end-of-stream meaning (no test-suite or ecosystem code does this
+  today). Single-thread fiber programs: no semantic change, and "no
+  measurable performance change" is enforced by the Phase 1 fast-path
+  benchmark gate (invariant 3). Thread thunks that capture channels: used
+  to error, now work. Channels reached via shared globals from a child:
+  used to be silent memory corruption (Motivation), now a descriptive
+  error while the object is live (§2 scopes the residual lifetime hole)
+  — undefined behavior narrowed, not eliminated.
   `thread-start!` thunk snapshot timing moves from "sometime after spawn,
   racy" to "at the call" — programs that relied on post-start mutation of
   captured data were racing; none exist in the test suites or ecosystem.
@@ -1042,6 +1154,12 @@ lock-free primitive layer.
    and whether `pool-submit` results should be first-class channels (as
    specified) or an opaque `task` record. Library-level; decide in Phase 5
    with usage feedback from the examples repo.
+6. **Cycle leaks.** §1 accepts that reference counting never reclaims a
+   channel kept alive only by stubs inside its own (or a peer's) queued
+   envelopes. Revisit after Phase 5 if real programs form such cycles;
+   the candidates are a debug-build cycle reporter (trial deletion over
+   the stub graph at leak-check time) or documentation alone. A general
+   cycle collector is out of proportion to the structure.
 
 ## Implementation plan
 
@@ -1057,20 +1175,24 @@ send/receive sequences on the shared representation, including slot
 reservation and the failure path (reservation released, envelope deinit,
 nothing enqueued); foreign-owner error for all channel primitives.
 Everything testable on one thread (promote, send, receive,
-channel-in-channel, refcount teardown, failed-send atomicity), plus the
-local fast-path benchmark.
+channel-in-channel, refcount teardown, failed-send atomicity, and
+re-entrant promotion — promoting a channel whose own queue contains it,
+§2 step 2), plus the local fast-path benchmark (invariant 3's gate).
 
 **Phase 2 — Envelopes at thread boundaries.** `thread-start!` copies the
 thunk into an envelope parent-side (closing the concurrent-copy race);
 `thread-join!` result/exception via envelope; retire the direct
 parent-heap→child `deepCopy` and `child_registry.storeResult` special case;
 process-global live-thread counter. First real cross-thread channel tests
-(send before receiver parks — no wakeup machinery needed yet).
+(send before receiver parks — no wakeup machinery needed yet; a receiver
+that parks first hangs until Phase 3, so Phases 2 and 3 ship in the same
+release).
 
 **Phase 3 — Cross-thread wakeup.** `ThreadNotifier` + `Reactor.notify`
 (`EVFILT.USER` / `eventfd` / WASI no-op); single-lock-hold registration
 with snapshot-and-clear wakes (§4) and the normative waiter lifecycle
-(§7: dedup, per-entry refcount, opportunistic pruning); the `wake_pending`
+(§7: dedup, per-entry refcount, opportunistic pruning); the per-scheduler
+shared-waiter registry and the `wake_pending`
 swap-loop protocol at both wake-check sites (§5); refcount-aware deadlock
 semantics including the main-fiber blocking path; notifier teardown.
 Regression test: park locally → promote → remote send wakes (§2).
@@ -1084,7 +1206,8 @@ local-side); timeout/timeout-val on **both** `channel-send` and
 `channel-receive` via the reactor timer heap; `channel-close!` /
 `channel-closed?` with drain-then-EOF receive semantics and wake-all;
 the local-channel `capacity`/`closed` fields and `dequeueChannel` wake
-(§6). Required interleaving test: reserve → concurrent close → push
+(§6); the eof-object send rejection (§6). Required interleaving test:
+reserve → concurrent close → push
 completes and the message is drained before EOF
 (reservation-as-admission, §4).
 
@@ -1092,12 +1215,16 @@ completes and the message is drained before EOF
 parallel-map/for-each, shutdown), the `processor-count` primitive, WASM
 degradation, docs page, and a worked example in `kaappi-examples`.
 
-**Phase 6 — Ecosystem.** `reuseport` option in `kaappi-net`;
-`http-listen-parallel` in `kaappi-http`; benchmark against
+**Phase 6 — Ecosystem.** `reuseport` option in `kaappi-net`; measure
+per-socket accept distribution on Linux and macOS first (§9's caveat) and
+implement the Darwin userspace-distributor fallback if the skew demands
+it; `http-listen-parallel` in `kaappi-http`; benchmark against
 `http-listen-threaded`/`-prefork`/`-fiber`; documentation of the four server
 models; correct the concurrency chapter of *The Kaappi Book*.
 
 **Phase 7 — Performance.** Cross-thread message micro-benchmarks; envelope
 arena (and/or immediate fast path) if Phase 1/3 numbers demand it;
 `parallel-map` scaling curve vs. core count; notifier coalescing under
-send storms.
+send storms; tail latency of a fiber server under concurrent large sends
+(the head-of-line drawback); symbol-table lock contention with
+symbol-heavy messages across many threads (§1).
