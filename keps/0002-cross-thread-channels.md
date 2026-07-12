@@ -188,6 +188,15 @@ reply-to patterns possible:
 Ports, continuations, and fibers remain unsendable and raise the same
 `UncopyableType` error as thread thunks.
 
+Two consequences worth knowing up front. First, sending a value shares
+**every channel reachable from it** — including one captured in a
+closure's environment. Sharing never changes behavior, only cost (the
+channel permanently swaps its lock-free local queue for a mutex-protected
+shared one), so don't close over channels you want to keep on the fast
+path. Second, streams have a first-class ending:
+`(channel-close! ch)` wakes all waiters, later receives drain what's
+queued and then return `(eof-object)` — no sentinel-message protocols.
+
 **Worker pools become a library, not a project.** The new pure-Scheme
 `(kaappi parallel)` library packages the pattern:
 
@@ -255,15 +264,20 @@ Three invariants the whole design preserves:
 pub const Envelope = struct {
     gc: *memory.GC,      // private mini-heap owning the message graph
     value: Value,        // root of the copied message, in envelope.gc
+    next: ?*Envelope,    // intrusive FIFO link, owned by the queue below
 };
 
 pub const SharedChannel = struct {
     refcount: std.atomic.Value(u32),   // one per Channel stub object, across all heaps
     lock: std.Thread.Mutex,            // guards everything below
-    queue: std.ArrayListUnmanaged(Envelope), // FIFO (index head; compact opportunistically)
+    queue_head: ?*Envelope,            // intrusive FIFO — O(1) push/pop, no backing
+    queue_tail: ?*Envelope,            //   array to compact or shrink (envelopes are
+    queue_len: u32,                    //   already individually allocated)
+    reserved: u32,                     // slots claimed by in-flight sends (§4)
     capacity: ?u32,                    // null = unbounded (§6)
+    closed: bool,                      // §6: close semantics
     recv_waiters: std.ArrayListUnmanaged(*ThreadNotifier),
-    send_waiters: std.ArrayListUnmanaged(*ThreadNotifier),  // bounded channels (§6)
+    send_waiters: std.ArrayListUnmanaged(*ThreadNotifier),
 };
 ```
 
@@ -290,6 +304,31 @@ so they cost one lookup, not a copy. A GC struct per message is not free;
 measuring it — and replacing it with a reusable arena if it shows up — is
 Phase 7's job (Unresolved question 1).
 
+**The refcount state machine (normative).** Every reference to a
+`SharedChannel` is a counted `Channel` stub, with no exceptions:
+
+- `promoteChannel` creates the `SharedChannel` with **`refcount = 1`** —
+  the promoting object itself becomes the first counted stub.
+- **`+1`** for every stub allocation: the `deepCopy` `.channel` arm (§2),
+  *including* stubs allocated inside envelope heaps.
+- **`−1`** in `freeObject` on any stub — a heap collection freeing a
+  dead stub, a child heap torn down at `thread-join!`, or an
+  `envelope.deinit()` sweeping the envelope's objects. No separate
+  envelope bookkeeping exists; envelope stubs release through the same
+  `freeObject` path as everything else.
+- **`0` ⇒ destroy**: take the lock once, drain and `deinit` every queued
+  envelope (which may recursively drop refcounts on channels *inside*
+  those messages), release remaining notifier registrations (§7), free.
+
+Worked example — thread A sends its local channel `reply` over an
+already-shared `tasks` channel to thread B: promote `reply` (rc 1, A's
+stub) → envelope stub allocated during the send copy (rc 2) → B receives
+and copies out a stub of its own (rc 3) → `envelope.deinit()` frees the
+envelope stub (rc 2). When A's and B's stubs are eventually collected,
+rc 1 → 0 and the `SharedChannel` is destroyed. A message that is never
+received dies with the channel: destroy-at-zero deinits the queued
+envelope, releasing the rc it held.
+
 ### 2. Promotion: one channel type, two representations
 
 `types.Channel` gains one field:
@@ -305,9 +344,26 @@ pub const Channel = struct {
 
 `promoteChannel(gc, ch)` — callable **only by the thread that owns the
 channel** (`ch.header.owner == gc.id`, which makes it race-free: no other
-thread may legally touch an unpromoted channel) — allocates the
-`SharedChannel`, drains any queued local values into envelopes in FIFO
-order, clears `head`/`tail`, and publishes the pointer with a release store.
+thread may legally touch an unpromoted channel) — does four things, in
+order:
+
+1. allocates the `SharedChannel` with `refcount = 1` (§1 state machine);
+2. drains any queued local values into envelopes in FIFO order, clearing
+   `head`/`tail`, and carries over `capacity`/`closed` (§6);
+3. **migrates pre-existing local waiters**: a fiber that parked on the
+   *local* representation (`waiting_on == ch` — a receiver on the empty
+   queue, or a sender on a full bounded queue) parked under the local wake
+   protocol, which no remote thread can see; for each such fiber,
+   `promoteChannel` registers the owning thread's own `ThreadNotifier` in
+   `recv_waiters`/`send_waiters` on its behalf, so the first remote
+   send/receive rings this thread and the §5 sweep wakes them. Promotion
+   runs inside a primitive on the owning thread — the local scheduler is
+   quiescent — so the scan over `sched.fibers` is race-free. Without this
+   step, a fiber that parked before promotion could hang forever: remote
+   sends ring only *registered* notifiers ("park locally → promote →
+   remote send wakes" is a required Phase 3 regression test);
+4. publishes the pointer with a release store.
+
 After promotion the heap object is a *stub*: an immutable handle whose only
 live field is `shared`.
 
@@ -332,14 +388,22 @@ so raw `eq?` would report `#f` for "the same channel" seen from two threads.
 `shared` pointer when both operands are promoted channels (Unresolved
 question 4 confirms the exact predicate set).
 
-**Foreign unpromoted channels become a clean error.** `channel-send` /
-`channel-receive` check: if `ch.shared == null` and
-`ch.header.owner != gc.id`, raise
+**Foreign channel objects become a clean error — promoted or not.** Every
+channel primitive checks `ch.header.owner != gc.id` and raises
 `"channel belongs to another thread; pass it through the thread thunk to share it"`.
-This converts Motivation Path 2 from silent memory corruption into an
-error with a fix in the message. (Promoted stubs reached through globals
-are fine to use: the stub is immutable after publication and the parent's
-GC keeps it alive.)
+The **only** legal cross-thread handle is a locally owned stub created by
+`deepCopy` (through a thread thunk or a message). This converts Motivation
+Path 2 from silent memory corruption into an error with the fix in the
+message. An earlier draft blessed *promoted* stubs reached through the
+shared globals map; that was wrong — not because reads race (the `shared`
+field is write-once-before-spawn on a non-moving heap, and a foreign
+reader touches no other byte of the object), but because of **lifetime**:
+a foreign user holds no refcount, so rebinding the global lets the owner's
+GC free the stub — and possibly the last-referenced `SharedChannel` —
+under the foreign thread. Requiring locally owned stubs means the §1
+refcount protocol accounts for every user, which in turn makes the §5
+deadlock heuristic sound (Unresolved question 2). Debug and `--gc-stress`
+builds assert that channel primitives never observe a foreign `owner`.
 
 ### 3. Thread thunks and join results become envelopes
 
@@ -369,26 +433,74 @@ copy today) and buys three things:
 `channel-send` dispatches on `ch.shared`:
 
 - **null** — today's code path, byte for byte
-  ([`primitives_fiber.zig:101`](https://github.com/kaappi/kaappi/blob/54706a0c/src/primitives_fiber.zig#L101)).
-- **non-null** — build the envelope (outside the lock: `deepCopy` can
-  allocate and must not hold the channel mutex), then under the lock: if
-  bounded and full, park as a send-waiter (§6); else push, then collect the
-  registered `recv_waiters` notifiers; release the lock; ring each notifier
-  (§5). Message copy happens *before* enqueue, so a receiver can never
-  observe a half-built envelope.
+  ([`primitives_fiber.zig:101`](https://github.com/kaappi/kaappi/blob/54706a0c/src/primitives_fiber.zig#L101)),
+  plus the local capacity/closed checks of §6 when set.
+- **non-null** — the sequence below. The envelope is built *outside* the
+  lock (`deepCopy` allocates and must not hold the channel mutex), and a
+  **slot reservation** taken *before* building it makes the eventual push
+  infallible. The reservation is what keeps park/retry and error paths
+  exactly-once: when a send parks, **no envelope exists yet** — the
+  `yield_retry` rewind re-runs only the cheap reservation step, so nothing
+  is duplicated, leaked, or lost — and a built envelope always has a slot
+  waiting for it.
 
-`channel-receive` on a shared channel: under the lock, if the queue is
-non-empty, pop; outside the lock, `deepCopy` out, `envelope.deinit()`, ring
-`send_waiters` (a slot opened). If empty: register this thread's notifier in
-`recv_waiters`, **re-check the queue under the same lock** (a send that ran
-between the first check and registration is now visible — the classic
-condition-variable discipline), then release and park exactly the way
-channel waits park today — status `.waiting`, `waiting_on` = the stub,
-`yield_retry` rewind so the primitive re-executes on wake
-([`primitives_fiber.zig:183`](https://github.com/kaappi/kaappi/blob/54706a0c/src/primitives_fiber.zig#L183)).
-Multiple receivers race on retry; the mutex-guarded pop makes delivery
-exactly-once; losers re-park. FIFO order per channel is guaranteed by the
-queue; fairness *across* competing receivers is not (same as today's fibers).
+```
+ 1. lock
+ 2.   if closed: unlock → raise "send on closed channel"
+ 3.   if bounded and queue_len + reserved == capacity:
+ 4.       register own ThreadNotifier in send_waiters (dedup: no-op if present)
+ 5.       unlock → park: status .waiting, waiting_on = the stub, yield_retry
+ 6.       (the retry re-enters at step 1; nothing has been copied yet)
+ 7.   reserved += 1
+ 8. unlock
+ 9. build envelope (deepCopy the payload)
+      on failure: lock; reserved -= 1; snapshot-and-clear send_waiters
+      (the slot reopened); unlock; ring the snapshot; envelope.deinit()
+      — which releases, via freeObject, every stub refcount the partial
+      copy took (§1); raise. Nothing was enqueued: "send fails ⇒ nothing
+      sent" holds, though promotion of reachable channels is sticky (§2,
+      Drawbacks).
+10. lock
+11.   reserved -= 1; push envelope; snapshot-and-clear recv_waiters
+12. unlock
+13. ring each snapshotted notifier (§5), releasing its registration
+    refcount (§7)
+```
+
+Steps 1–7 hold the mutex **continuously**, so the full-check and the
+waiter registration cannot interleave with a receive — the classic lost
+wakeup (observe full → a receive pops and rings the then-empty list →
+register → park forever) is structurally impossible, and no separate
+"re-check" step is needed. The residual window — registered but not yet
+parked when a remote wake arrives — is closed by the `wake_pending` sweep
+ordering in §5. A message becomes visible only at step 11, so a receiver
+can never observe a half-built envelope.
+
+`channel-receive` mirrors it:
+
+```
+ 1. lock
+ 2.   if queue non-empty:
+ 3.       pop envelope; snapshot-and-clear send_waiters (a slot opened)
+ 4.       unlock; ring the snapshot; deepCopy out into own heap;
+ 5.       envelope.deinit(); return the value
+ 6.   if closed: unlock → return (eof-object)                       (§6)
+ 7.   register own ThreadNotifier in recv_waiters (dedup)
+ 8. unlock → park (.waiting on the stub, yield_retry rewind —
+    [primitives_fiber.zig:183])
+```
+
+Both waiter snapshots are taken **under the lock** and rung after release
+— a live waiter list is never iterated unlocked. Wake policy is
+**wake-all** on both sides, matching every existing wake discipline in the
+runtime ([`fiber.zig:347`](https://github.com/kaappi/kaappi/blob/54706a0c/src/fiber.zig#L347)):
+losers of the retry race re-park; the mutex-guarded pop and
+reservation-backed push make delivery and enqueue exactly-once. FIFO holds
+per channel with respect to *completed* sends: a reservation is not yet an
+enqueue, so two racing senders' order is decided at step 11 (they had no
+defined order anyway), while a single fiber's sends stay ordered because
+it runs them sequentially. Fairness *across* competing receivers is not
+guaranteed (same as today's fibers).
 
 The existing caveat that a fiber cannot park under a re-entrant native frame
 (README "Fibers" limitation) applies unchanged to shared-channel waits: the
@@ -423,18 +535,35 @@ pub const ThreadNotifier = struct {
 - **WASI:** no SRFI-18 threads exist there; `notify` is a no-op and nothing
   ever calls it.
 
-`notify` does two things: set `wake_pending` (for a target thread that is
-*running* Scheme, not parked in `poll`) and ring the fd (for a target thread
-blocked in `reactor.poll`). The woken thread — never the sender — then
-sweeps its own fibers: any fiber with status `.waiting` whose `waiting_on`
-is a promoted channel with a non-empty queue (or, for send-waiters, a free
-slot) flips to `.suspended` and retries. The sweep hooks into the two places
-that already do per-tick wake checks: `FiberScheduler.schedule()`'s
-expired-timer check
+`notify` always does **both**: set `wake_pending` (release store), then
+ring the fd. The fd covers a thread blocked in — or about to block in —
+`reactor.poll`: a kqueue `EVFILT.USER` trigger and an eventfd counter both
+stay pending until retrieved, so a notify that lands just before the
+`kevent`/`epoll_wait` call is still delivered (`EV.CLEAR` clears on
+*retrieval*, not on the tick of time passing). The flag exists so a thread
+busy running Scheme notices without a syscall. The woken thread — never
+the sender — sweeps its own fibers under one mandated sequence:
+
+```zig
+// The single normative consume protocol, at both wake-check sites:
+while (notifier.wake_pending.swap(false, .acq_rel)) sweepSharedWaiters();
+// Only after the loop exits false may the scheduler block in
+// reactor.poll: a notify arriving after the last swap still rang the
+// fd, which poll observes immediately; one arriving before it was
+// swept by the loop. No interleaving loses a wakeup.
+```
+
+`sweepSharedWaiters` flips to `.suspended` every local fiber whose status
+is `.waiting` and whose `waiting_on` is a promoted channel that is ready
+*for it*: non-empty queue for a receiver, free slot for a parked sender,
+or `closed` for either. Woken fibers retry their primitive (§4); spurious
+wakes re-park. The sweep hooks into the two per-tick wake-check sites that
+already exist: `FiberScheduler.schedule()`'s expired-timer check
 ([`fiber.zig:284`](https://github.com/kaappi/kaappi/blob/54706a0c/src/fiber.zig#L284))
-consults `wake_pending`, and `parkOnReactor`
+runs the swap loop each tick, and `parkOnReactor`
 ([`fiber.zig:486`](https://github.com/kaappi/kaappi/blob/54706a0c/src/fiber.zig#L486))
-treats a fired notifier like any other readiness event.
+runs it before blocking and treats a fired notifier fd like any other
+readiness event (drain the eventfd / consume the trigger, then sweep).
 
 **Why this stays safe against KEP-0001's fd-reuse analysis:** resolved
 question 4 accepted fd-keyed registration *because* no user code runs
@@ -467,22 +596,50 @@ The `hasRunnableFibers` / `Reactor.isEmpty` pair
 extends accordingly: fibers waiting on externally-referenced shared channels
 count as "alive, waiting".
 
-### 6. Bounded capacity and timeouts
+### 6. Bounded capacity, timeouts, and close
 
-Two small API extensions round out the model (both work for local channels
-too, implemented on the existing park protocol):
+Three API extensions round out the model. All three work for **local**
+channels too, with their state on `types.Channel` until promotion:
+`capacity: ?u32`, `closed: bool`, and a queue-length count join the struct
+in §2, and `promoteChannel` carries them into the `SharedChannel` (step 2).
+The local implementations need no new wake machinery — a local sender
+parks through the existing `waiting_on` protocol, and the two events that
+change what a waiter can do (`dequeueChannel` freeing a slot,
+`channel-close!`) call `wakeChannelWaiters`
+([`fiber.zig:347`](https://github.com/kaappi/kaappi/blob/54706a0c/src/fiber.zig#L347)),
+which already wakes senders and receivers uniformly; the retry sorts out
+who proceeds. Bounded channels therefore do **not** force promotion:
+fiber-only backpressure stays on the lock-free path.
 
 - **`(make-channel)` / `(make-channel capacity)`** — default unbounded
   (today's semantics); with a capacity, `channel-send` on a full channel
-  parks the sender until a receive frees a slot (backpressure). Send-side
-  parking registers in `send_waiters` symmetrically to §4.
-- **`(channel-receive ch)` / `(channel-receive ch timeout)` /
-  `(channel-receive ch timeout timeout-val)`** — SRFI-18-style timeout
-  arguments, exactly the shape `thread-join!` already accepts
+  parks the sender until a receive frees a slot (backpressure): §4 steps
+  3–6 on the shared path, `waiting_on` parking on the local path.
+- **Timeouts on both operations** —
+  `(channel-receive ch [timeout [timeout-val]])` **and**
+  `(channel-send ch v [timeout [timeout-val]])`, SRFI-18-style, exactly
+  the shape `thread-join!` already accepts
   ([`primitives_srfi18.zig:431`](https://github.com/kaappi/kaappi/blob/54706a0c/src/primitives_srfi18.zig#L431)),
-  implemented on the reactor timer heap that timed waits already use. With
-  no `timeout-val`, expiry raises (matching `thread-join!`'s
-  `join-timeout`); with one, it is returned.
+  implemented on the reactor timer heap that timed waits already use.
+  Without `timeout-val`, expiry raises (matching `thread-join!`'s
+  `join-timeout`); with one, it is returned. Send timeouts exist for
+  symmetry: Drawbacks leans on timeouts as the escape hatch for weakened
+  deadlock detection, and a sender parked on a full channel in a
+  cross-thread deadlock needs the same hatch as a receiver. A timed-out
+  waiter simply stops waiting; any notifier registration it left behind is
+  cleaned up by the §7 lifecycle rules (a stale ring is a harmless
+  spurious sweep).
+- **`(channel-close! ch)` / `(channel-closed? ch)`** — sets `closed` and
+  wakes *every* waiter (local `wakeChannelWaiters` plus
+  snapshot-and-clear-and-ring of both notifier lists). Sends to a closed
+  channel — including parked senders as they wake — raise
+  `"send on closed channel"`. Receives **drain the remaining queue
+  first**, then return `(eof-object)` — the same end-of-stream convention
+  as ports, so the worker-loop idiom needs no sentinel protocol:
+  `(let loop ((x (channel-receive ch))) (unless (eof-object? x) … (loop (channel-receive ch))))`.
+  Close is idempotent, and legal only through a locally owned handle (§2).
+  Without first-class close, every pool and server invents ad-hoc
+  sentinels; §8's `pool-shutdown!` is the immediate consumer.
 
 ### 7. GC and teardown interactions
 
@@ -493,12 +650,24 @@ too, implemented on the existing park protocol):
 - **`markFiberState` / write barriers:** `waiting_on` already traced
   ([`fiber.zig:570`](https://github.com/kaappi/kaappi/blob/54706a0c/src/fiber.zig#L570));
   no new Value fields are added to `Fiber`.
+- **Waiter-list lifecycle (normative):** at most **one entry per
+  `ThreadNotifier` per list** — registration dedups by pointer (a no-op if
+  the thread is already registered, however many of its fibers wait) and
+  takes `+1` on the notifier. An entry is removed, releasing that
+  refcount, when: (a) a notify **snapshots-and-clears** the list (§4/§6 —
+  the ringer releases after ringing; threads whose fibers re-park simply
+  re-register), (b) the channel is destroyed at refcount zero, or (c) any
+  path holding the lock finds `alive == false` and prunes opportunistically
+  (send, receive, close, promotion, destroy). A timed-out waiter's entry
+  may thus persist until the next ring — one harmless spurious sweep — but
+  dedup bounds total retained state at *threads × channels* regardless of
+  waiter churn, and the per-entry refcount makes lazy pruning UAF-free.
 - **Thread teardown:** the child VM/GC teardown at join is unchanged —
   envelopes queued by the dead thread are *not* on its heap and survive it;
   that is the point. Its `ThreadNotifier` flips `alive = false` and drops
-  the reactor backing; `notify` on a dead handle is a no-op; registered
-  handles are pruned lazily by the next send that finds `alive == false`
-  (the refcount keeps the struct itself valid until then).
+  the reactor backing; `notify` on a dead handle is a no-op; its remaining
+  list entries are pruned per the lifecycle rules above (the refcount keeps
+  the struct itself valid until the last entry is released).
 - **`--gc-stress` and leak discipline:** `SharedChannel`, envelopes, and
   notifiers form a new class of non-GC-managed, refcounted runtime state.
   Every phase lands with thread-churn tests under `-Dgc-stress=true` and
@@ -523,25 +692,35 @@ library is pure Scheme over `(srfi 18)` + `(kaappi fibers)`:
              (thread-start!
                (make-thread
                  (lambda ()
-                   (let loop ()
-                     (let ((msg (channel-receive tasks)))   ; parks on the notifier
-                       (unless (eq? msg 'shutdown)
-                         (let ((thunk (car msg)) (reply (cdr msg)))
-                           (channel-send reply
-                             (guard (e (#t (cons 'error e)))
-                               (cons 'ok (thunk)))))
-                         (loop))))))))
+                   (let loop ((msg (channel-receive tasks)))  ; parks on the notifier
+                     (unless (eof-object? msg)      ; closed ⇒ drain queue, then exit
+                       (let ((thunk (car msg)) (reply (cdr msg)))
+                         (channel-send reply
+                           (guard (e (#t (cons 'error e)))
+                             (cons 'ok (thunk)))))
+                       (loop (channel-receive tasks))))))))
            (iota n)))))
 
 (define (pool-submit pool thunk)
   (let ((reply (make-channel)))          ; promoted on send (owner-side), aliased in
-    (channel-send (pool-tasks pool) (cons thunk reply))
+    (channel-send (pool-tasks pool) (cons thunk reply))  ; raises after shutdown
     reply))
 
 (define (task-wait reply)
   (let ((r (channel-receive reply)))
     (if (eq? (car r) 'ok) (cdr r) (raise (cdr r)))))
+
+(define (pool-shutdown! pool)
+  (channel-close! (pool-tasks pool))     ; workers drain queued tasks, then see EOF
+  (for-each thread-join! (pool-threads pool)))
 ```
+
+Shutdown semantics fall out of §6's close protocol rather than sentinel
+messages: `pool-shutdown!` closes the task channel (waking all idle
+workers at once), each worker finishes its current task, drains any
+still-queued tasks, exits on `(eof-object)`, and is joined. Tasks
+submitted before shutdown all run and their replies stay receivable;
+`pool-submit` after shutdown raises the closed-channel error.
 
 `parallel-map` / `parallel-for-each` chunk the input, submit, and reassemble
 in order. Exports: `make-pool`, `pool-submit`, `task-wait`, `pool-shutdown!`,
@@ -593,6 +772,11 @@ thousands of connections*.
   notifier lifetimes are exactly the kind of manual protocol the GC
   otherwise spares us; the teardown discipline in §7 plus gc-stress
   thread-churn tests are the containment.
+- **Promotion is sticky and can be incidental.** Any channel reachable
+  from a sent value (including via closure capture) is promoted as a
+  `deepCopy` side effect — even if the send subsequently fails — and never
+  demotes. Never incorrect, only slower for that channel from then on;
+  documented in the guide (don't capture channels you want kept local).
 - **`eq?` on channels is no longer identity across threads** (stubs);
   `eqv?`/`equal?` compensate, but it is a subtlety users can trip on.
 - **Channel dispatch branch** on every send/receive — one predictable
@@ -788,11 +972,15 @@ lock-free primitive layer.
    reference in a process-wide side heap — BEAM's proven design for >64-byte
    binaries (see Prior art) — without breaking the no-shared-mutable
    invariant.
-2. **Deadlock heuristic precision.** "Other live threads exist" is coarse:
-   a single-purpose child that provably holds no reference to the channel
-   still suppresses local deadlock errors elsewhere. Is per-channel
-   `refcount > 1` alone enough once stubs-via-globals are accounted for?
-   Settle during Phase 3 review with the test matrix.
+2. **Deadlock heuristic precision.** §2's rejection of foreign-owned
+   handles means every legal user of a `SharedChannel` holds a counted
+   stub, so per-channel `refcount > 1` is by itself a sound "another
+   thread may act" test — an envelope in flight holds a stub refcount too,
+   so even an unreceived message keeps the channel "externally
+   referenced". The narrowed question: is the coarse "other live threads
+   exist" disjunct still needed at all, or can it be dropped in favor of
+   pure refcount reasoning? Settle during Phase 3 review with the test
+   matrix.
 3. **Unify `thread-join!` timeouts with the notifier.** The OS-thread join
    path polls status at 1 ms
    ([`primitives_srfi18.zig:449`](https://github.com/kaappi/kaappi/blob/54706a0c/src/primitives_srfi18.zig#L449));
@@ -813,11 +1001,15 @@ Phases 1–4 are the critical path, in order. Phase 5 needs 3; Phase 6 needs
 KEP-0001 Phase 5; Phase 7 needs 4.
 
 **Phase 1 — SharedChannel core, single-threaded.** `src/shared_channel.zig`
-(SharedChannel, Envelope, refcounting); `Channel.shared` field; owner-side
-promotion with local-queue drain; `deepCopy` `.channel` arm (promote +
-alias); send/receive dispatch on the shared representation; foreign-owner
-error; stub `freeObject` accounting. Everything testable on one thread
-(promote, send, receive, channel-in-channel, refcount teardown), plus the
+(SharedChannel with the intrusive envelope FIFO, Envelope, the full §1
+refcount state machine — owner stub = 1, destroy at zero); `Channel.shared`
+field; owner-side promotion with local-queue drain and local-waiter
+migration (§2); `deepCopy` `.channel` arm (promote + alias); the §4
+send/receive sequences on the shared representation, including slot
+reservation and the failure path (reservation released, envelope deinit,
+nothing enqueued); foreign-owner error for all channel primitives.
+Everything testable on one thread (promote, send, receive,
+channel-in-channel, refcount teardown, failed-send atomicity), plus the
 local fast-path benchmark.
 
 **Phase 2 — Envelopes at thread boundaries.** `thread-start!` copies the
@@ -828,16 +1020,23 @@ process-global live-thread counter. First real cross-thread channel tests
 (send before receiver parks — no wakeup machinery needed yet).
 
 **Phase 3 — Cross-thread wakeup.** `ThreadNotifier` + `Reactor.notify`
-(`EVFILT.USER` / `eventfd` / WASI no-op); waiter registration with the
-check-register-recheck protocol; `wake_pending` sweep in `schedule()` and
-`parkOnReactor`; refcount/live-thread-aware deadlock semantics including the
-main-fiber blocking path; notifier teardown. Multi-thread stress tests
-(N producers / M consumers × bounded heaps × `-Dgc-stress=true`), plus the
-kaappi#1455 mutex/condvar suite re-run to confirm no interaction.
+(`EVFILT.USER` / `eventfd` / WASI no-op); single-lock-hold registration
+with snapshot-and-clear wakes (§4) and the normative waiter lifecycle
+(§7: dedup, per-entry refcount, opportunistic pruning); the `wake_pending`
+swap-loop protocol at both wake-check sites (§5); refcount-aware deadlock
+semantics including the main-fiber blocking path; notifier teardown.
+Regression test: park locally → promote → remote send wakes (§2).
+Multi-thread stress tests (N producers / M consumers × waiter churn ×
+`-Dgc-stress=true`), plus the kaappi#1455 mutex/condvar suite re-run to
+confirm no interaction.
 
-**Phase 4 — Capacity and timeouts.** `(make-channel capacity)` with
-send-side parking; `channel-receive` timeout/timeout-val on the reactor
-timer heap; same for local channels.
+**Phase 4 — Capacity, timeouts, and close.** `(make-channel capacity)`
+with send-side parking (slot reservation shared-side, `waiting_on`
+local-side); timeout/timeout-val on **both** `channel-send` and
+`channel-receive` via the reactor timer heap; `channel-close!` /
+`channel-closed?` with drain-then-EOF receive semantics and wake-all;
+the local-channel `capacity`/`closed` fields and `dequeueChannel` wake
+(§6).
 
 **Phase 5 — `(kaappi parallel)`.** The library (pool, submit, wait,
 parallel-map/for-each, shutdown), the `processor-count` primitive, WASM
