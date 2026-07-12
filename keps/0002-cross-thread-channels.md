@@ -36,8 +36,10 @@ that crosses a thread boundary is transparently *promoted*: its queue moves
 into a heap-independent, mutex-protected `SharedChannel` whose messages are
 self-contained *envelopes* (each a private mini-heap filled by the existing
 `deepCopy` machinery). Sends from any thread deep-copy the value into an
-envelope; receives deep-copy it out into the receiving thread's heap. No
-Scheme heap object is ever reachable from two GCs. A cross-thread send wakes
+envelope; receives deep-copy it out into the receiving thread's heap —
+every message is copied **twice**, a deliberate trade of throughput for
+isolation (see Drawbacks). No Scheme heap object is ever reachable from
+two GCs. A cross-thread send wakes
 remote parked fibers by ringing the target thread's reactor (`EVFILT.USER` on
 kqueue, `eventfd` on epoll) — the cross-thread wakeup that KEP-0001
 explicitly deferred.
@@ -248,7 +250,7 @@ primitive lock-free.
                   └──────────────────────────────┘            (EVFILT.USER/eventfd)─┘
 ```
 
-Three invariants the whole design preserves:
+Four invariants the whole design preserves:
 
 1. **No Scheme heap object is ever reachable from two GCs.** `SharedChannel`
    and envelopes live outside every GC heap; messages are copied in and out.
@@ -257,6 +259,15 @@ Three invariants the whole design preserves:
    own fibers' statuses.
 3. **The single-thread fast path is untouched.** An unpromoted channel is
    exactly today's `head`/`tail` pair queue plus one pointer null-check.
+4. **Promotion is one-way and atomic; no mixed-mode channel ever exists.**
+   `shared` is written exactly once, by the owning thread, only after the
+   local queue has been drained and local waiters migrated (§2), and a
+   promoted channel never demotes. No interleaving can observe a
+   half-promoted channel: local-channel operations on the owning thread
+   are serialized by cooperative fiber scheduling (promotion runs inside a
+   primitive, which has no fiber switch points), and no other thread can
+   reach the channel before the publishing release store — the stub first
+   escapes through the very `deepCopy` that triggered the promotion.
 
 ### 1. `SharedChannel` and envelopes (new `src/shared_channel.zig`)
 
@@ -420,7 +431,15 @@ copy today) and buys three things:
 - channels captured by the thunk are promoted *by the owner*, on the owner's
   thread — the only place promotion is legal;
 - the thunk snapshot has clear semantics: the value as of the
-  `thread-start!` call.
+  `thread-start!` call. The snapshot is *atomic with respect to all Scheme
+  code*, not best-effort: `deepCopy` runs as one native primitive on the
+  calling thread with no fiber switch points, so no Scheme mutator — on
+  this thread or any other — can run mid-copy (no other OS thread may
+  legally mutate this heap at all, and the aliased-object exceptions,
+  mutexes and condvars, are uncopyable and error out of the graph before
+  any question of tearing arises). No caller-side synchronization is
+  needed for compound updates: mutations before the call are in the
+  snapshot, mutations after it are not.
 
 `thread-join!`'s result path is unified the same way: the child's result
 (and exception) crosses in an envelope instead of the bespoke
@@ -475,6 +494,16 @@ register → park forever) is structurally impossible, and no separate
 parked when a remote wake arrives — is closed by the `wake_pending` sweep
 ordering in §5. A message becomes visible only at step 11, so a receiver
 can never observe a half-built envelope.
+
+**A reservation is the point of no return.** The `closed` check runs only
+at admission (step 2). A sender that reserved its slot and released the
+lock may find, back at step 10, that a concurrent `channel-close!` has
+closed the channel in the interim — the push still proceeds, and the
+message is delivered through close's drain-then-EOF rule (§6). "Close
+stops sends" therefore means precisely: no send is *admitted* after
+close; a send already admitted is never failed after its copy work and
+its message is never lost. (The sender's own stub holds a refcount, so
+the channel cannot be destroyed while its send is in flight.)
 
 `channel-receive` mirrors it:
 
@@ -629,17 +658,36 @@ fiber-only backpressure stays on the lock-free path.
   waiter simply stops waiting; any notifier registration it left behind is
   cleaned up by the §7 lifecycle rules (a stale ring is a harmless
   spurious sweep).
-- **`(channel-close! ch)` / `(channel-closed? ch)`** — sets `closed` and
-  wakes *every* waiter (local `wakeChannelWaiters` plus
-  snapshot-and-clear-and-ring of both notifier lists). Sends to a closed
-  channel — including parked senders as they wake — raise
-  `"send on closed channel"`. Receives **drain the remaining queue
-  first**, then return `(eof-object)` — the same end-of-stream convention
-  as ports, so the worker-loop idiom needs no sentinel protocol:
+- **`(channel-close! ch)` / `(channel-closed? ch)`** — end-of-stream as a
+  first-class state. The shared-path sequence, same shape as §4:
+
+  ```
+   1. lock
+   2.   if closed: unlock → return                          (idempotent)
+   3.   closed = true
+   4.   snapshot-and-clear recv_waiters AND send_waiters — close wakes
+        everyone, both directions
+   5. unlock
+   6. ring every snapshotted notifier (§5); wake local waiters
+      (wakeChannelWaiters)
+  ```
+
+  (The local path is steps 2, 3, and the local wake of 6.) Effects on
+  each party, exhaustively: **parked and future senders** observe
+  `closed` at §4 step 2 and raise `"send on closed channel"`; a sender
+  that had already **reserved** before the close completes its push and
+  the message is delivered — reservation-as-admission (§4), so close
+  never fails a send after its copy work and never loses an admitted
+  message. **Receivers** drain the remaining queue first — including
+  late reservation-admitted pushes, which §4's receive ordering handles
+  naturally (the queue check precedes the closed check) — then return
+  `(eof-object)`, the same end-of-stream convention as ports, so the
+  worker-loop idiom needs no sentinel protocol:
   `(let loop ((x (channel-receive ch))) (unless (eof-object? x) … (loop (channel-receive ch))))`.
-  Close is idempotent, and legal only through a locally owned handle (§2).
-  Without first-class close, every pool and server invents ad-hoc
-  sentinels; §8's `pool-shutdown!` is the immediate consumer.
+  **Queued envelopes** at destroy-at-zero are deinit'd by the §1 rule
+  regardless of closed state. Close is legal only through a locally owned
+  handle (§2). Without first-class close, every pool and server invents
+  ad-hoc sentinels; §8's `pool-shutdown!` is the immediate consumer.
 
 ### 7. GC and teardown interactions
 
@@ -1036,7 +1084,9 @@ local-side); timeout/timeout-val on **both** `channel-send` and
 `channel-receive` via the reactor timer heap; `channel-close!` /
 `channel-closed?` with drain-then-EOF receive semantics and wake-all;
 the local-channel `capacity`/`closed` fields and `dequeueChannel` wake
-(§6).
+(§6). Required interleaving test: reserve → concurrent close → push
+completes and the message is drained before EOF
+(reservation-as-admission, §4).
 
 **Phase 5 — `(kaappi parallel)`.** The library (pool, submit, wait,
 parallel-map/for-each, shutdown), the `processor-count` primitive, WASM
