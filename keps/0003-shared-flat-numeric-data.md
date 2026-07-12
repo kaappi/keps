@@ -244,6 +244,29 @@ rule out for isolated heaps. Granularity stays task-level and
 user-chosen, and everything except buffer contents keeps the full
 share-nothing guarantee.
 
+**The implicit boundary is permanent, not pending.** Implicit
+parallelism requires the runtime to relocate arbitrary — possibly
+suspended — computation between cores on its own initiative; in Kaappi
+a suspended computation is fiber frames and registers full of pointers
+into one specific heap, so relocation is fiber migration, which
+KEP-0002's Alternatives reject as structurally incompatible with
+isolated heaps (Racket futures and Haskell sparks exist because a
+shared heap makes "run this thunk over there" free). No later phase of
+either KEP changes this: speculative futures, auto-parallelized loops,
+and parallel-by-default collections are off the table unless the
+shared-heap question itself is reopened. The trade carries a
+compensating guarantee worth stating plainly: because tasks cross by
+copy, `parallel-map` over an impure, stateful function still cannot
+create a data race on Scheme data — each worker mutates its own heap's
+copies. OpenMP-style systems hand you implicit-feeling loops where a
+race is undefined behavior; Kaappi hands you an explicit call where a
+race is unrepresentable, with this KEP's buffers as the single,
+opted-in, documented exception. Future ergonomics work
+(`parallel-for`, `parallel-vector-map`, a `(parallel …)` macro) can
+make the surface feel more implicit, but it stays library sugar over
+the pool: the region stays explicit underneath, and this paragraph is
+the record of why.
+
 ## Reference-level design
 
 **[skeleton — to be completed before acceptance; the load-bearing
