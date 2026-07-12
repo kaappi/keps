@@ -414,6 +414,20 @@ application traces from `kaappi-examples`.
 **Lands in:** a `research/benchmarks/` plan + KEP-0003 gate amendment;
 Phase 7 executes it.
 
+**Status (2026-07-12).** Done: the protocol is
+[`research/benchmarks/README.md`](benchmarks/README.md) — six workloads
+(three in-place, three fan-out) plus controls, the gate-cell list, an
+operational definition of copy+reassembly overhead share (parent-side
+instrumentation only, so the measurement error biases *against*
+KEP-0003 — registered as acceptable), Kalibera–Jones/Mytkowicz
+statistics discipline, and the gate rule operationalized with
+CI-resolved thresholds, a two-machine agreement requirement, and the
+"absent" fourth outcome mapped to KEP-0003's gate-check text.
+Thresholds carried verbatim from this section's first cut; change
+control freezes them once Phase 7 data collection starts. KEP-0003's
+gate paragraphs now point at the protocol. Execution is
+kaappi#1472 → kaappi#1474.
+
 ---
 
 ## P6 — Cycle collection for shared objects
@@ -500,7 +514,9 @@ plain `SO_REUSEPORT` path everywhere.
    u8 memset/memcpy-idiom and integer-reduction kernels, measure the
    interpreter-tier control.
 3. P3 envelope A/B/C/D harness — kaappi repo, part of KEP-0002 Phase 1.
-4. P5 `research/benchmarks/` workload matrix spec — this repo, before
-   Phase 7.
+4. ~~P5 `research/benchmarks/` workload matrix spec — this repo, before
+   Phase 7.~~ Done — [`benchmarks/README.md`](benchmarks/README.md);
+   with it, every remaining follow-up item lives in the kaappi
+   repo (epic kaappi#1465).
 5. P7 accept-distribution harness — kaappi-net repo, first task of
    Phase 6.
