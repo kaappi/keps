@@ -191,6 +191,23 @@ re-run when §4/§6 pseudocode changes.
 **Lands in:** `research/tla/shared_channel.tla` (follow-up work item,
 its own PR); KEP-0002 Phase 1/3 test plans reference it.
 
+**Status (2026-07-12).** Method step 1 is done: the model lives in
+[`research/tla/`](tla/README.md) (TLC 2.19, seven configs, ~950k
+distinct states at the largest bound) and checks all six properties.
+Verdict per the pre-registered criteria: **KEP-0002 must be amended
+before Phase 1.** Three violations found, each with a machine-checked
+counterexample and a candidate repair verified in the same model:
+(1) the §5 selective sweep loses wakeups for waiters whose registration
+was consumed by a ring they lost — permanent hang that even
+`channel-close!` cannot reach; repair `flip_all` verified. (2) a
+reservation-admitted send racing `channel-close!` can be destroyed
+unreceived after all until-EOF workers exit — §8's "tasks submitted
+before shutdown all run" fails; repair (EOF also waits for
+`reserved = 0`) verified. (3) that repair is sound only if the §4
+failure path also rings `recv_waiters` on a closed channel. Proposed
+amendment text is in the model's README. Method steps 2 (PCT stress
+harness) and 3 (GenMC escalation) remain with Phase 3.
+
 ---
 
 ## P3 — Envelope cost and copy elision
@@ -442,8 +459,9 @@ plain `SO_REUSEPORT` path everywhere.
 
 ## Follow-up work items (tracked, not part of this document's PR)
 
-1. `research/tla/shared_channel.tla` — the P2 model (own PR to this
-   repo).
+1. ~~`research/tla/shared_channel.tla` — the P2 model (own PR to this
+   repo).~~ Done — see P2's status block; the open successor item is
+   the KEP-0002 §4–§6 amendment the model's findings require.
 2. P1 codegen/vectorization micro-benchmark — kaappi repo (needs the
    LLVM backend).
 3. P3 envelope A/B/C/D harness — kaappi repo, part of KEP-0002 Phase 1.
