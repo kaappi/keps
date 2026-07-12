@@ -280,7 +280,46 @@ Four invariants the whole design preserves:
    completes and carries the release/acquire edge for every
    promotion-time write.
 
-### 1. `SharedChannel` and envelopes (new `src/shared_channel.zig`)
+### 1. The shared-object protocol; `SharedChannel` and envelopes (new `src/shared_object.zig`, `src/shared_channel.zig`)
+
+**The shared-object protocol.** Channels are the first of (at least) two
+runtime types that must outlive any single heap — KEP-0003's shared flat
+numeric buffers are the declared second — so the lifetime rules are
+specified once, generically, and instantiated per type; writing them
+down generically here is KEP-0003's Phase 0. A **shared object** is a
+refcounted structure allocated from the process-global allocator,
+outside every GC heap. Five rules:
+
+1. **Every reference is a counted stub.** The only way any thread — or
+   any envelope — holds a shared object is through an ordinary
+   GC-managed heap object (a *stub*) owning exactly one refcount.
+   Uncounted references do not exist; this is what makes lifetime
+   reasoning local (§2's foreign-owner rule) and per-object "another
+   thread may act" tests sound (§5, Unresolved question 2).
+2. **Stubs are created by `deepCopy`'s alias arm.** Meeting a stub (or
+   an object being promoted into shared form) allocates a new stub on
+   the target heap pointing at the same shared object, `refcount += 1`.
+   Identity across heaps is pointer identity of the shared object (§2).
+3. **Stubs are released by `freeObject`.** `refcount -= 1` from any path
+   that frees the stub — a heap collection, a child heap torn down at
+   `thread-join!`, an `envelope.deinit()`. No type carries separate
+   bookkeeping.
+4. **Zero destroys.** The final decrement runs the type's destroy hook;
+   the hook may recursively release other shared objects' refcounts
+   (a drained envelope releasing the stubs it contains).
+5. **Reference counting does not collect cycles**, and every instance
+   type must state its cycle exposure (channels: the known limitation
+   below; KEP-0003 buffers: none — flat contents cannot hold stubs).
+   Every instance participates in the unit suite's leak checking (an
+   undestroyed shared object at process exit is a failure) and the §7
+   gc-stress thread-churn tests.
+
+The mechanics live once in `src/shared_object.zig` (the refcounted
+header plus stub alloc/release helpers); everything type-specific below
+— queue, waiter lists, promotion — sits behind `SharedChannel`'s own
+mutex, invisible to the protocol. `ThreadNotifier` (§5) is refcounted
+too but is **not** an instance: its references come from `SharedChannel`
+waiter lists under §7's lifecycle, never from heap stubs.
 
 ```zig
 pub const Envelope = struct {
@@ -328,7 +367,8 @@ symbol) the table lock is a contention point Phase 7 measures. A GC struct per m
 measuring it — and replacing it with a reusable arena if it shows up — is
 Phase 7's job (Unresolved question 1).
 
-**The refcount state machine (normative).** Every reference to a
+**The refcount state machine (normative) — the protocol instantiated
+for channels.** Every reference to a
 `SharedChannel` is a counted `Channel` stub, with no exceptions:
 
 - `promoteChannel` creates the `SharedChannel` with **`refcount = 1`** —
@@ -353,7 +393,9 @@ rc 1 → 0 and the `SharedChannel` is destroyed. A message that is never
 received dies with the channel: destroy-at-zero deinits the queued
 envelope, releasing the rc it held.
 
-**Known limitation — reference counting does not collect cycles.** An
+**Known limitation — reference counting does not collect cycles**
+(protocol rule 5; channels are the exposed instance, because only
+channel messages can carry stubs). An
 envelope stub holds a refcount, so a queued-but-never-received message
 that (transitively) contains a stub of the very channel it is queued on
 pins that channel forever: after `(channel-send ch ch)`, `ch`'s refcount
@@ -1166,8 +1208,11 @@ lock-free primitive layer.
 Phases 1–4 are the critical path, in order. Phase 5 needs 3; Phase 6 needs
 KEP-0001 Phase 5; Phase 7 needs 4.
 
-**Phase 1 — SharedChannel core, single-threaded.** `src/shared_channel.zig`
-(SharedChannel with the intrusive envelope FIFO, Envelope, the full §1
+**Phase 1 — SharedChannel core, single-threaded.** `src/shared_object.zig`
+(the generic shared-object protocol: refcounted header, stub
+alloc/release helpers, leak-check hook); `src/shared_channel.zig`
+(SharedChannel as the protocol's first instance, with the intrusive
+envelope FIFO, Envelope, the full §1
 refcount state machine — owner stub = 1, destroy at zero); `Channel.shared`
 field; owner-side promotion with local-queue drain and local-waiter
 migration (§2); `deepCopy` `.channel` arm (promote + alias); the §4
