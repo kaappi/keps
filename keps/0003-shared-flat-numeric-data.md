@@ -417,6 +417,10 @@ would. Designing the buffer type now keeps that door open.
 
 ## Unresolved questions
 
+*Question 2 has a research plan (P1), and the acceptance gate has
+pre-registered decision criteria (P5), in
+[`research/open-problems.md`](../research/open-problems.md).*
+
 1. **Type surface.** Distinct disjoint types (`shared-bytevector?` ⇒
    `bytevector?` is `#f`, Racket-style) or subtypes that answer `#t` to
    the base predicates and work with the existing accessor procedures?

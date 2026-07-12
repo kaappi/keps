@@ -1164,6 +1164,12 @@ lock-free primitive layer.
 
 ## Unresolved questions
 
+*Questions 1, 2, and 6 have research plans — literature, method, and
+pre-registered decision criteria — in
+[`research/open-problems.md`](../research/open-problems.md) (P3, P4,
+P6), which also covers the §§4–6 protocol-verification plan (P2) and
+the §9 accept-distribution measurement (P7).*
+
 1. **Envelope cost.** Is a GC struct per message acceptable for small hot
    messages (fixnums, short strings)? Phase 1 lands a
    `channel-send`/`channel-receive` cross-thread micro-benchmark; Phase 7
