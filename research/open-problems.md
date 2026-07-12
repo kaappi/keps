@@ -120,6 +120,28 @@ for v1 either way; revisit only with a concrete user demand.
 normative) + UQ 2 resolution. The codegen experiment is a follow-up work
 item in the kaappi repo (needs the LLVM backend).
 
+**Status (2026-07-12).** Method step 1 is done: the constraints memo is
+[`research/p1-access-semantics.md`](p1-access-semantics.md). Highlights:
+plain accesses are rejected with IR-level chapter and verse (LLVM's
+NotAtomic contract returns `undef` under races and licenses load
+re-introduction — the bounds-check/index split breaks VM memory safety
+even for flat data); `unordered` implements KEP-0003's promise in
+LLVM's own words ("races produce somewhat sane results instead of
+having undefined behavior") at zero instruction cost; codegen probes
+(clang/LLVM 22.1.7) observe the real cost — the loop vectorizer refuses
+atomics at every ordering including `unordered` (8 doubles/iteration
+gap on the fill kernel), and the memset/memcpy libcall idiom is
+prohibited for `unordered` too, so the u8 kernels may gap wider than
+the f64 ones. The hybrid is precisely scoped, including the guide
+sentence it would weaken and three containments (debug builds compile
+accesses `unordered`; disjointness-checked slice helpers; per-element
+blast radius). Step 2's protocol is refined: validate that the plain
+baseline vectorizes under Kaappi's own backend pipeline before
+measuring (Zig 0.16's default pipeline did not vectorize even the plain
+probe), add integer-reduction and memset-idiom kernels, and interpret
+"vectorizable kernels" as ceiling-validated ones. The decision itself
+waits on step 2 in the kaappi repo, per the pre-registered criteria.
+
 ---
 
 ## P2 — Concurrency-protocol verification
@@ -472,7 +494,11 @@ plain `SO_REUSEPORT` path everywhere.
    `research/benchmarks/` spec; KEP-0002 Phase 1 implementation moves
    to the kaappi repo.
 2. P1 codegen/vectorization micro-benchmark — kaappi repo (needs the
-   LLVM backend).
+   LLVM backend). Protocol refined in
+   [`p1-access-semantics.md`](p1-access-semantics.md) §9: confirm the
+   plain baseline vectorizes under Kaappi's pipeline first, add
+   u8 memset/memcpy-idiom and integer-reduction kernels, measure the
+   interpreter-tier control.
 3. P3 envelope A/B/C/D harness — kaappi repo, part of KEP-0002 Phase 1.
 4. P5 `research/benchmarks/` workload matrix spec — this repo, before
    Phase 7.
