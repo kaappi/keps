@@ -20,7 +20,11 @@
 > question 1). The Motivation below carries what can be measured *today*;
 > the fan-out evidence it cannot yet carry is exactly what the gate waits
 > for. Sections marked **[skeleton]** are intentionally incomplete until
-> then.
+> then. The gate's workload matrix, statistics protocol, and
+> classification rule are pre-registered in
+> [`research/benchmarks/`](../research/benchmarks/README.md) (P5);
+> thresholds frozen 2026-07-12, before any Phase 7 code or numbers
+> exist.
 
 *The benchmark in the Motivation was run on macOS aarch64 (Apple
 Silicon), ReleaseSafe, at kaappi commit
@@ -462,7 +466,11 @@ KEP-0002 §1 is still cheap to reword.
 **Gate check.** KEP-0002 Phase 7 `parallel-map` data answers: is the
 pinch fan-out copies (→ prefer Alternative 1, immutable payloads), the
 reassembly wall / in-place demand (→ this KEP), or absent (→ reject
-both, revisit later)?
+both, revisit later)? Evaluated mechanically per the pre-registered
+protocol in [`research/benchmarks/`](../research/benchmarks/README.md):
+overhead shares with confidence intervals on the named gate cells, and
+classification only when both reference machines agree — disagreement
+means the KEP stays gated.
 
 **Phase 1 — `SharedBuffer` core.** The type, stubs, refcounting on the
 Phase 0 protocol; `-ref`/`-set!` with the §Reference access semantics;
