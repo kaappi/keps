@@ -188,6 +188,62 @@ The rules a user must know:
   guide's first line about them says when *not* to (small payloads:
   copying 1 MiB costs 65 µs — just copy).
 
+**Why this plus KEP-0002 reads as native parallelism.** Every runtime
+that offers "just call it" parallelism — Rayon's `par_iter`, OpenMP's
+`parallel for`, Java's parallel streams — is secretly providing two
+planes: a **control plane** (how work units are distributed and their
+completion observed) and a **data plane** (how payloads reach and leave
+the workers). Shared-heap runtimes get both from the heap. Kaappi's
+isolated heaps forbid that, so the two sibling KEPs rebuild one plane
+each on terms the GC model accepts:
+
+```
+ user surface:     (parallel-map pool f xs)    (render-band! pixels …)
+                   ── no threads, channels, or fibers visible ──
+                             │                        │
+ control plane     KEP-0002: pools over channels      │
+ (small, copied)   tasks/results/shutdown cross       │
+                   by deep copy — µs-cheap because    │
+                   control messages are small         │
+                             │                        │
+ data plane                  │            KEP-0003: shared flat buffers
+ (big, referenced)           │            payload crosses by refcounted
+                             │            reference — O(1), written in place
+                             ▼                        ▼
+ substrate:        N isolated heaps, N schedulers, N reactors
+```
+
+KEP-0002 alone already gives a working `parallel-map` with no visible
+concurrency plumbing, but for numeric payloads the copy semantics leak
+back in as *shape*: the Motivation's fan-out arithmetic (N sender-side
+copies, serialized on the submitting thread, plus the reassembly wall)
+is a serial section that grows with the data — Amdahl eating the
+speedup from inside the plumbing. This KEP removes exactly that serial
+section and nothing else: what crosses per task shrinks to a descriptor
+(buffer handle, offset, length — a few dozen bytes through the same
+channels), the payload never moves, and results are written in place,
+so there is no reassembly step at all.
+
+The composition is also this KEP's memory model, not just its
+transport. A shared buffer ships no atomics API and no locks; a channel
+send/receive pair (its internal mutex, KEP-0002 §4) is what provides
+the happens-before edge between a worker's writes and a reader. In the
+example above, `task-wait` is simultaneously the control-plane join and
+the data-plane memory fence — "fill your slice, then send; receive,
+then read" is well-defined *because* coordination already flows through
+channels. Neither KEP can offer this alone: channels without buffers
+have nothing to fence; buffers without channels would need a
+synchronization API invented from scratch.
+
+Scoped honestly: this lands Kaappi in the fork-join /
+parallel-collections family — the user names the parallel region
+(`make-pool`, `parallel-map`, slice-per-worker) and never touches a
+thread, channel, or fiber — not in the implicit-parallelism family
+(futures, sparks, auto-parallelization), which KEP-0002's Alternatives
+rule out for isolated heaps. Granularity stays task-level and
+user-chosen, and everything except buffer contents keeps the full
+share-nothing guarantee.
+
 ## Reference-level design
 
 **[skeleton — to be completed before acceptance; the load-bearing
