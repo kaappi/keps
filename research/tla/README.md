@@ -4,25 +4,29 @@ This is the P2 deliverable from
 [`research/open-problems.md`](../open-problems.md): a bounded TLA+ model
 of the cross-thread channel protocol specified in
 [KEP-0002](../../keps/0002-cross-thread-channels.md) §§1–7, checked with
-TLC. Per P2's pre-registered decision criteria, **the model must pass all
-six properties at the stated bounds before Phase 1 merges; any violation
-is a KEP-0002 amendment first, code second.** The model currently
-demonstrates three violations (Findings 1–3 below), so KEP-0002 needs
-amending before Phase 1.
+TLC. Per P2's pre-registered decision criteria, **the model must pass
+all six properties at the stated bounds before Phase 1 merges; any
+violation is a KEP-0002 amendment first, code second.**
+
+The model found three protocol bugs in the original KEP text
+(Findings 1–3 below) and exposed one unspecified case (receive-side
+copy failure). **All four are repaired/specified in the amended KEP-0002
+text, and every repair was model-checked before it became spec text.**
+The rejected designs remain in the suite as regression witnesses: three
+configs fail *by design* and `run.sh` asserts those expectations.
 
 ## Running
 
 ```bash
-./run.sh            # all seven configs, ~90 s total; asserts expected outcomes
+./run.sh                       # all nine configs, ~8 min total
 ./run.sh core_cap4_selective   # a single config
 ```
 
 Needs Java 17+. `run.sh` downloads `tla2tools.jar` on first use (results
-below produced with TLC 2.19). Three configs are *expected* to fail —
-they are the findings, kept failing on purpose so the counterexamples
-stay reproducible; `run.sh` exits nonzero only if any config deviates
-from its recorded expectation. Re-run the suite whenever KEP-0002's §4/§6
-pseudocode changes (P2's standing rule).
+below produced with TLC 2.19) and exits nonzero only if a config
+deviates from its recorded expectation. Re-run the suite whenever
+KEP-0002's §4–§6 pseudocode changes (P2's standing rule, now also the
+KEP's Phase 1 merge gate).
 
 ## What is modeled
 
@@ -35,30 +39,36 @@ runs two fibers (`f0a`, `f0b`); `t1`/`t2` run one fiber each (`f1`,
 | §1 refcount state machine | `rc`, `held[t]` (stubs per heap), envelope stubs for self-referential messages (`(channel-send ch ch)`), destroy-at-zero with queue deinit, the accepted cycle leak |
 | §2 promotion | atomic promote: drain (with re-entrant alias outcome for a queued self-message), `rc = 1`, local-waiter migration (step 4) |
 | §3 thunk hand-off | net `rc += 1` per spawned thread |
-| §4 send | steps 1–8 as one mutex-atomic action; reservation; envelope build outside the lock; the step-9 copy-failure path (release reservation, ring, deinit releases partial-copy stubs); infallible push with `recv_waiters` snapshot-and-clear; per-target ring |
-| §4 receive | pop + `send_waiters` snapshot; copy-out (`rc`/`held` for self messages); envelope deinit; drain-then-EOF; register + park |
-| §5 notifier | `wake_pending` flag then fd, as two steps; the swap-loop / poll consume protocol as separate scheduler actions; sweep policies (below) |
+| §4 send | steps 1–8 as one mutex-atomic action; reservation; envelope build outside the lock; the step-9 copy-failure path (release reservation, ring — incl. the amended closed-channel `recv_waiters` ring — deinit releases partial-copy stubs); infallible push with `recv_waiters` snapshot-and-clear; per-target ring |
+| §4 receive | pop + `send_waiters` snapshot; copy-out (`rc`/`held` for self messages); envelope deinit; the amended copy-failure re-queue-at-head + `recv_waiters` ring; drain-then-EOF with the amended `reserved == 0` guard; register + park |
+| §5 notifier | `wake_pending` flag then fd, as two steps; the swap-loop / poll consume protocol as separate scheduler actions; the amended unconditional sweep (and the rejected readiness-filtered sweep) |
 | §6 close | idempotence-guarded set + both-lists snapshot-and-clear + ring |
 | §7 lifecycle | waiter-list dedup (sets keyed by thread); teardown releasing all of a heap's stubs |
 | cooperative scheduling | `cur[t]`: fibers of one thread serialize; primitives have no fiber switch points; the scheduler (sweep/poll) runs only when no fiber is mid-primitive |
 
-**Atomicity discipline:** every mutex-held region of the §4/§6 pseudocode
-is a single atomic action (sound — the mutex serializes them); every
-lock-free window is its own step, because that is where protocol bugs
-live: the registered-but-not-yet-parked window, the build, each
-flag-then-fd ring, the `wake_pending` swap, the poll, each refcount
-transition.
+**Atomicity discipline:** every mutex-held region of the §4/§6
+pseudocode is a single atomic action (sound — the mutex serializes
+them); every lock-free window is its own step, because that is where
+protocol bugs live: the registered-but-not-yet-parked window, the
+build, each flag-then-fd ring, the `wake_pending` swap, the poll, each
+refcount transition.
 
-**Scoped out** (would not change the checked properties at these bounds):
-notifier refcounts and the `alive` flag (no thread exits mid-model —
-§7's teardown pruning is untested here); §6 timeouts; local-channel
-capacity pre-promotion; the §5 deadlock heuristic (that is P4); equality
-(UQ 4). Promotion's *internal* re-entrancy (early publication, §2
-step 2) is modeled by its specified outcome, not rediscovered — the
-model checks cross-thread interleavings, not `deepCopy`'s recursion.
-Weak-memory effects are not modeled (TLA+ steps are sequentially
-consistent); the §5 acq_rel argument is encoded in the action structure,
-and GenMC remains P2's escalation path for memory-model doubts.
+**Protocol variants (CONSTANTS).** The amended KEP-0002 text corresponds
+to `SweepPolicy = "flip_all"` and `EofPolicy = "wait_reserved"` (plus
+the `RecvFail` re-queue rule). The rejected designs are kept selectable:
+`"selective"` (the original §5 readiness-filtered sweep — Finding 1),
+`"asis"` (the original EOF-when-closed rule — Finding 2), and
+`"wait_reserved_naive"` (the incomplete Finding-2 repair — Finding 3).
+
+**Scoped out** (would not change the checked properties at these
+bounds): notifier refcounts and the `alive` flag (no thread exits
+mid-model — §7's teardown pruning is untested here); §6 timeouts;
+local-channel capacity pre-promotion; the §5 deadlock heuristic (that
+is P4); equality (UQ 4). Promotion's *internal* re-entrancy (early
+publication, §2 step 2) is modeled by its specified outcome, not
+rediscovered. Weak-memory effects are not modeled (TLA+ steps are
+sequentially consistent); the §5 acq_rel argument is encoded in the
+action structure, and GenMC remains P2's escalation path.
 
 ## The six pre-registered properties
 
@@ -66,153 +76,148 @@ and GenMC remains P2's escalation path for memory-model doubts.
 |---|---|
 | 1. refcount ≥ 0 | `RcAccounting` — strengthened to exact accounting: `rc = Σ held + self-stubs in queue + self-stubs in flight` |
 | 2. destroy exactly once | `DestroyedClean` + destroy guarded in `Teardown` (reachable only once since `rc` stays 0) |
-| 3. envelope always enqueued or deinit'd, never both | `EnvelopeAccounting`: `built = in-hand + queued + received + destroy-deinit + fail-deinit` |
-| 4. no admitted send lost across close | `ReservedAccounting` + push never guarded on `closed` + the `strand` scenario's `NoAbandonedTask` (see Finding 2) |
-| 5. drain-then-EOF | structural in `RecvEOF` (queue-empty guard precedes EOF) — TLC exercises close-vs-push interleavings against it |
+| 3. envelope always enqueued or deinit'd, never both | `EnvelopeAccounting`: `built = in-hand + queued + received + destroy-deinit + fail-deinit` (a re-queued envelope moves hand→queue, staying balanced) |
+| 4. no admitted send lost across close | `ReservedAccounting` + push never guarded on `closed` + the `strand` scenario's `NoAbandonedTask` |
+| 5. drain-then-EOF | structural in `RecvEOF` (queue-empty and `reserved == 0` guards precede EOF) — TLC exercises close-vs-push interleavings against it |
 | 6. no lost wakeup (liveness) | `Termination` (`<>[](AllDone ∧ AllTorn)`) under weak fairness, plus TLC deadlock checking — a stranded parked fiber is a deadlock because scripts always close the stream |
 
-Two scenario scripts: **core** (promotion drain + migration, a
-pre-promotion local self-send made optional so both the drain-alias and
-the empty-queue migration paths are reachable, competing receivers on
-two threads, a remote self-send, copy failures, close at the end) and
-**strand** (the §8 pool-shutdown shape: one sender racing an independent
-closer, two receive-until-EOF workers).
+Two scenario scripts: **core** (promotion drain + migration, optional
+pre-promotion local self-send so both the drain-alias and empty-queue
+migration paths are reachable, competing receivers on two threads, a
+remote self-send, both failure modes, close at the end) and **strand**
+(the §8 pool-shutdown shape: one sender racing an independent closer,
+two receive-until-EOF workers).
 
 ## Results (TLC 2.19, macOS aarch64, 2026-07-12)
 
-| Config | Sweep | EOF policy | Expected | States (distinct) | Depth |
-|---|---|---|---|---|---|
-| `core_cap1_flipall` + liveness | flip_all | as-is | **pass** ✓ | 872,585 | 62 |
-| `core_cap4_flipall` | flip_all | as-is | **pass** ✓ | 167,033 | 50 |
-| `core_cap4_selective` | **selective (§5 as written)** | as-is | **fail** — Finding 1 | 53,248* | 28 |
-| `strand_flipall` | flip_all | as-is (§4/§6 as written) | **fail** — Finding 2 | 4,777* | 20 |
-| `strand_waitres` + liveness | flip_all | wait_reserved | **pass** ✓ (repair verified) | 17,703 | 41 |
-| `core_cap4_waitres_naive` | flip_all | wait_reserved_naive | **fail** — Finding 3 | 44,514* | 26 |
-| `core_cap1_waitres` + liveness | flip_all | wait_reserved | **pass** ✓ (repair, no regression) | 945,608 | 63 |
+| Config | Variant | Checks | Expected | States (distinct) |
+|---|---|---|---|---|
+| `core_cap1_flipall` | pre-amendment EOF, fixed sweep | safety + liveness | **pass** ✓ | 872,585 |
+| `core_cap4_flipall` | pre-amendment EOF, fixed sweep | safety | **pass** ✓ | 167,033 |
+| `core_cap4_selective` | **§5 sweep as originally written** | safety | **fail** — Finding 1 | ~50k* |
+| `strand_flipall` | **§4/§6 EOF as originally written** | safety | **fail** — Finding 2 | ~5k* |
+| `strand_waitres` | amended | safety + liveness | **pass** ✓ | 17,703 |
+| `core_cap4_waitres_naive` | **incomplete Finding-2 repair** | safety | **fail** — Finding 3 | ~40k* |
+| `core_cap4_waitres` | amended, both failure modes | safety | **pass** ✓ | 1,607,571 |
+| `core_cap1_recvfail` | amended, receive failures, capacity 1 | safety + liveness | **pass** ✓ | 5,260,378 |
+| `core_cap1_waitres` | amended, send failures, capacity 1 | safety + liveness | **pass** ✓ | 945,608 |
 
-\* states explored before the violation stopped the search.
+\* states explored before the violation stopped the search; varies
+across runs (parallel BFS).
 
-All four passing configs satisfy every safety invariant, TLC's deadlock
+All passing configs satisfy every safety invariant, TLC's deadlock
 check, and (where marked) the `Termination` liveness property.
 
 ---
 
-## Finding 1 — lost wakeup: consumed registration + §5's selective sweep
+## Finding 1 — lost wakeup: consumed registration + the readiness-filtered sweep
 
-**Violates:** property 6 (no lost wakeup); makes §6's "close wakes
-everyone" false. **Config:** `core_cap4_selective` (deadlock, 25-step
-counterexample).
+**Violated:** property 6 (no lost wakeup); made §6's "close wakes
+everyone" false. **Witness:** `core_cap4_selective` (deadlock, 25-step
+counterexample). **Repaired in §5:** the sweep flips every registry
+fiber unconditionally.
 
-Three normative pieces of KEP-0002 contradict each other:
+Three normative pieces of the original text contradicted each other:
+rings **snapshot-and-clear** the waiter list (§4/§6/§7a, "threads whose
+fibers re-park simply re-register"); the sweep flipped only fibers
+"whose channel is ready *for it*" (§5); and §4 promised "wake-all …
+losers of the retry race re-park." A fiber rung but no longer ready —
+because another receiver drained the queue first, exactly the loser §4
+anticipates — was neither flipped (never retries, never re-registers)
+nor still registered (the ring consumed its entry). Later pushes rang a
+list its thread was not on; `channel-close!` rang nobody. Permanent
+hang: an idle §8 pool worker sleeps through `pool-shutdown!` and
+`thread-join!` never returns.
 
-- §4/§6/§7(a): every ring **snapshots-and-clears** the waiter list;
-  "threads whose fibers re-park simply re-register."
-- §5: the sweep flips only fibers "whose channel is ready *for it*."
-- §4: "Wake policy is wake-all on both sides … losers of the retry race
-  re-park."
+Trace sketch: f2 registers `t2`; f0a pushes (snapshot `{t2}`, clear,
+ring); f0b pops the message first; f2 parks; `t2` sweeps — not ready,
+not flipped; f0a closes — snapshot `∅`; f2 parked forever with
+`closed = TRUE`.
 
-A fiber that is *rung but no longer ready* — because another receiver
-drained the queue first, exactly the loser §4 anticipates — is neither
-flipped (the §5 readiness filter skips it, so it never retries and never
-re-registers) nor still registered (the ring consumed its entry). No
-future event can reach it: later pushes snapshot a list it is not on,
-and `channel-close!` rings only currently-registered notifiers. The
-"loser re-parks and re-registers" recovery assumes the loser gets to
-*run*, which is precisely what the readiness filter denies.
+The repair makes §4's wake-all literal; losers run, re-park, and
+re-register. Alternatives (persistent registrations; sweep-side
+re-registration) are recorded in §5 as rejected-for-v1 — they trade
+spurious retries for channel-lock traffic inside the sweep.
 
-Counterexample (TLC's shortest, capacity 4): f2 registers `t2` and is
-about to park; f0a pushes, snapshot `{t2}`, clears the list, rings `t2`;
-f0b's receive pops the message first; f2 parks; `t2`'s scheduler
-consumes the flag and the fd, sweeps — queue empty, not closed, f2 not
-ready, not flipped; f0a closes — snapshot `∅`, **rings nobody**; f1's
-send raises on the closed channel; `t0`/`t1` tear down. Final state:
-`closed = TRUE` (f2 is now *ready* by §5's own definition), f2 parked
-forever, `t2` never tears down. In §8 terms: an idle pool worker sleeps
-through `pool-shutdown!` and `thread-join!` hangs — the exact "pools
-must never silently hang" case P4 flags.
+## Finding 2 — an admitted send could be abandoned across close
 
-**Repair directions.** (R1) *Unconditional sweep*: flip every fiber in
-the shared-waiter registry on any ring; woken losers retry, re-park, and
-re-register, making §4's wording literally true. Verified here as
-`SweepPolicy = "flip_all"` — all six properties pass. Costs spurious
-wakes (the notifier is channel-anonymous anyway, so a multi-channel
-thread already sweeps broadly). (R2) *Persistent registration*: rings
-snapshot without clearing; entries are removed when the sweep actually
-flips a fiber (or at timeout/destroy). Keeps wakeups targeted but moves
-entry removal from the ringer to the waiter's thread and adds channel
-lock traffic at sweep time; §7's lifecycle rules would need rewriting.
-Not modeled. (R3) *Sweep re-registers* on behalf of parked-but-unready
-fibers (as §2 step 4 already does at promotion). Same lock-at-sweep
-cost. Not modeled. R1 is the minimal amendment: one §5 sentence plus
-dropping §7's "re-park ⇒ re-register" reliance.
+**Violated:** §8's "tasks submitted before shutdown all run" (property
+4's user-visible face). **Witness:** `strand_flipall`
+(`NoAbandonedTask`, 17-step counterexample). **Repaired in §4 receive
+step 6 / §6:** EOF requires `closed ∧ queue empty ∧ reserved == 0`;
+registration is permitted when `closed ∧ reserved > 0`.
 
-## Finding 2 — an admitted send can be abandoned across close
+§4 makes reservation the point of no return, and the original text
+promised the admitted message "is never lost" — but *enqueued* is not
+*receivable*: f1 reserves; f0a closes (rings nobody — no one parked);
+both until-EOF workers see empty+closed and take EOF; f1's push lands;
+teardown destroys the message unreceived. The submitting `channel-send`
+**returned successfully**, so the §8 pool would hang a `task-wait` with
+no error anywhere. With the repair, a receiver arriving inside the copy
+window parks and is rung by the late push; verified in
+`strand_waitres` including liveness.
 
-**Violates:** §8's "Tasks submitted before shutdown all run and their
-replies stay receivable" (property 4's user-visible face). **Config:**
-`strand_flipall` (`NoAbandonedTask`, 17-step counterexample).
+## Finding 3 — the naive Finding-2 repair strands receivers on copy failure
 
-§4 makes reservation the point of no return: a send admitted before
-`channel-close!` completes its push afterward, and "its message is never
-lost." The model shows "never lost" means *enqueued*, not *receivable*:
-f1's send reserves; f0a closes (nobody parked — rings nobody); both
-until-EOF workers find the queue empty and closed and take EOF; f1's
-push lands; teardown destroys the channel and deinits the message,
-unreceived. The submitting `channel-send` **returned successfully**, so
-in §8's pool a `task-wait` on the reply channel now hangs with no error
-anywhere — reachable whenever `pool-submit` races `pool-shutdown!`.
+**Witness:** `core_cap4_waitres_naive` (deadlock, 22-step
+counterexample). **Repaired in §4 step 9:** the failure path's
+snapshot-and-clear also covers `recv_waiters` when the channel is
+closed.
 
-**Repair, verified** (`EofPolicy = "wait_reserved"`, config
-`strand_waitres`): EOF additionally waits out the reservation window —
-§4 receive step 6 becomes *"if closed **and reserved = 0**: return
-(eof-object)"*, and step 7's registration is also allowed when
-`closed ∧ reserved > 0`. A receiver that finds the channel closed but a
-send still admitted parks; the late push rings `recv_waiters` as always
-and the message is drained before anyone sees EOF. All properties pass,
-including `NoAbandonedTask` and liveness. The alternative — documenting
-the race away ("don't race submit against shutdown") — contradicts
-§4's own reservation-as-admission promise and leaves a silent hang in
-the flagship §8 idiom.
+With only the EOF guard added, a receiver parked waiting out a
+reservation (`closed ∧ reserved > 0`) was never woken when that
+reservation died on the copy-failure path — the original failure path
+rang only `send_waiters`, because pre-repair only senders could wait on
+a reservation. The full repair passes `core_cap1_waitres` /
+`core_cap4_waitres` with failures enabled, including liveness.
 
-## Finding 3 — the obvious Finding-2 repair deadlocks without a failure-path ring
+## The receive-side copy-failure rule (new §4 receive step 5)
 
-**Config:** `core_cap4_waitres_naive` (deadlock, 22-step counterexample).
+The original text left receive-side `deepCopy` failure unspecified —
+and as written it would have *lost* the popped message. The amended
+rule, checked in `core_cap1_recvfail` / `core_cap4_waitres`: push the
+envelope back at the queue head (FIFO preserved, stubs intact — the
+envelope was never touched), snapshot-and-clear + ring `recv_waiters`
+(receivers may have parked while the queue was momentarily empty), and
+raise. "Receive fails ⇒ nothing received."
 
-The naive version of the Finding-2 repair (EOF waits for `reserved = 0`
-and nothing else changes) strands receivers: f1 reserves just before
-close; a receiver, blocked from EOF by `reserved = 1`, registers and
-parks; f1's *copy fails* — and §4's failure path (step 9) rings only
-`send_waiters`, because in the unrepaired protocol only senders can be
-waiting on a reservation. The parked receiver's EOF condition is now
-satisfied (`closed`, queue empty, `reserved = 0`) but nothing ever rings
-its notifier.
+Two consequences the model surfaced, now stated in the KEP:
 
-**Repair, verified** (part of `EofPolicy = "wait_reserved"`): the §4
-failure path's snapshot-and-clear also covers `recv_waiters` when the
-channel is closed (equivalently: whenever it releases the last
-reservation on a closed channel). With it, `core_cap1_waitres` passes
-all properties including liveness with copy failures enabled — the full
-repair does not regress the core protocol.
+- **Transient capacity overshoot.** The pop's ring may already have
+  admitted a sender into the freed slot before the re-queue restores
+  the message, so a bounded queue can briefly exceed its capacity by
+  the number of concurrently failing receives. Admission stays strict;
+  the overshoot drains on the next receive. Exercised at capacity 1 in
+  `core_cap1_recvfail`.
+- **Persistent failure is not rescuable — by design.** The model bounds
+  copy failures per receiver (`failLeft`); a receiver that fails
+  *forever* is an effectively-dead consumer, and producers parked
+  behind it hang exactly as KEP-0002's weakened deadlock detection
+  documents (timeouts are the hatch). The re-queue rule guarantees no
+  *message* loss and no *wakeup* loss, not progress against a consumer
+  that can never complete a receive. (An early model draft let failures
+  consume receive budgets and rediscovered this as a spurious
+  "deadlock" — the fix was the model's workload, not the protocol.)
 
 ---
 
-## Amendment summary for KEP-0002 (proposed, pending owner review)
+## Amendment record
 
-1. **§5 sweep** (Finding 1): `sweepSharedWaiters` flips *every* fiber in
-   the shared-waiter registry (R1); delete the per-fiber readiness
-   filter, or reclassify it as an invalid optimization. §4's wake-all
-   wording and §7(a)'s "re-park ⇒ re-register" then compose soundly.
-2. **§4 receive step 6 / §6** (Finding 2): EOF requires
-   `closed ∧ queue empty ∧ reserved = 0`; registration permitted when
-   `closed ∧ reserved > 0`. §8's shutdown claim becomes true as stated.
-3. **§4 step 9 failure path** (Finding 3): on a closed channel the
-   failure path rings `recv_waiters` too.
+Landed in KEP-0002 together with this suite (all four changes
+model-checked first):
 
-The three violating configs stay in the suite as regression witnesses:
-after the KEP text is amended, the model's `"selective"` /
-`"asis"` / `"wait_reserved_naive"` modes remain as documentation of the
-rejected designs, and the passing modes become the spec's normative
-behavior.
+1. **§5** — unconditional sweep (Finding 1), with the rejected
+   readiness filter and its failure mode documented inline.
+2. **§4 receive step 6 / §6** — `reserved == 0` EOF guard; §8's
+   shutdown claim now holds as stated (Finding 2).
+3. **§4 step 9** — failure path rings `recv_waiters` on a closed
+   channel (Finding 3).
+4. **§4 receive step 5** — receive-side copy failure re-queues at the
+   head and rings `recv_waiters`; capacity may transiently overshoot
+   (previously unspecified).
+
+KEP-0002's Phase 1 now carries this suite as a merge gate, and Phases
+3–4 list the findings' interleavings as required regression tests.
 
 ## Fidelity caveats
 
@@ -223,9 +228,8 @@ sound in comments in the module: mutex regions are atomic actions; the
 sweep is atomic per swap-loop iteration (justified by §5's acq_rel
 happens-before argument); `PollWake` is enabled whenever the fd is
 pending (a superset of real schedules — kqueue triggers and eventfd
-counters stay armed until retrieved); local-channel wake modeling covers
-only the one local waiter the scripts can produce. One observation
-outside the checked properties: §4's receive pops the envelope *before*
-the copy-out — the KEP does not specify what happens if the receive-side
-`deepCopy` fails (OOM), which as written would lose the popped message;
-worth a sentence in §4 when it is amended.
+counters stay armed until retrieved); local-channel wake modeling
+covers only the one local waiter the scripts can produce; receive-side
+copy failures strike before any partial stub is taken (send-side
+`BuildFail` covers the partial-copy-release path, and real partial
+copy-out garbage releases through the same `freeObject` route).

@@ -33,17 +33,23 @@ CONSTANTS
                 \* | "flip_all" (candidate repair: flip every parked shared waiter)
   FailCopy,     \* TRUE: the §4 step-9 copy-failure branch is reachable
   Scenario,     \* "core" | "strand"  (fiber scripts; see README)
-  EofPolicy     \* "asis"               (§4 step 6: EOF when drained ∧ closed)
-                \* | "wait_reserved_naive" (candidate repair for Finding 2: EOF
-                \*     additionally waits for reserved = 0, no other change)
+  EofPolicy,    \* "asis"               (pre-amendment §4 step 6: EOF when
+                \*     drained ∧ closed — REJECTED, Finding 2)
+                \* | "wait_reserved_naive" (EOF additionally waits for
+                \*     reserved = 0, no other change — REJECTED, Finding 3)
                 \* | "wait_reserved"    (same, plus the §4 failure path also
-                \*     rings recv_waiters when the channel is closed)
+                \*     rings recv_waiters when closed — the AMENDED normative
+                \*     text)
+  RecvFail      \* TRUE: the receive-side copy-out can fail; the amended §4
+                \* re-queues the envelope at the head and rings recv_waiters
+                \* ("receive fails => nothing received")
 
 ASSUME Cap \in Nat \ {0}
 ASSUME SweepPolicy \in {"selective", "flip_all"}
 ASSUME FailCopy \in BOOLEAN
 ASSUME Scenario \in {"core", "strand"}
 ASSUME EofPolicy \in {"asis", "wait_reserved_naive", "wait_reserved"}
+ASSUME RecvFail \in BOOLEAN
 
 Threads == {"t0", "t1", "t2"}
 Fibers  == {"f0a", "f0b", "f1", "f2"}
@@ -109,6 +115,7 @@ PCs == {"ready", "h1", "h2",
         "send_fail_locked", "send_fail_ring", "send_fail_deinit",
         "recv_preparked", "recv_parked", "recv_wake",
         "recv_ring", "recv_copyout", "recv_deinit",
+        "recv_fail_ring", "recv_fail_done",
         "lrecv_preparked", "lrecv_parked",
         "close_ring", "close_done"}
 
@@ -131,6 +138,7 @@ Init ==
           rt |-> "none", contPc |-> "ready",
           plainLeft |-> PlainSends(f), selfLeft |-> SelfSends(f),
           recvLeft |-> RecvBudget(f),
+          failLeft |-> IF RecvBudget(f) > 0 THEN 1 ELSE 0,
           preloadLeft |-> IF f = "f0a" THEN p ELSE 0,
           closeLeft |-> IF Closer(f) THEN 1 ELSE 0,
           eof |-> FALSE]]
@@ -166,7 +174,8 @@ ReadyFor(f) == CASE fst[f].pc = "recv_parked" -> ReadyRecv
 (* target; when snap is empty it proceeds to contPc.  Rings run with      *)
 (* cur[t] held — they execute inside the primitive on the ringer's thread. *)
 
-RingPcs == {"send_ring", "send_fail_ring", "recv_ring", "close_ring"}
+RingPcs == {"send_ring", "send_fail_ring", "recv_ring", "recv_fail_ring",
+            "close_ring"}
 
 RingFlag(f) ==
   /\ fst[f].pc \in RingPcs /\ fst[f].rt = "none" /\ fst[f].snap # {}
@@ -448,6 +457,31 @@ RecvCopyOut(f) ==        \* deepCopy into own heap: a self message adds a stub
   /\ UNCHANGED chanVars /\ UNCHANGED destroyed /\ UNCHANGED notifVars
   /\ UNCHANGED schedVars /\ UNCHANGED cntVars
 
+RecvCopyFail(f) ==       \* amended §4: receive-side copy failure re-queues the
+                         \* envelope at the head (FIFO preserved, stubs intact)
+                         \* and rings recv_waiters — receivers may have parked
+                         \* while the queue was empty during this pop window
+  /\ RecvFail /\ fst[f].pc = "recv_copyout" /\ fst[f].failLeft > 0
+  /\ queue' = << fst[f].env >> \o queue
+  /\ fst' = [fst EXCEPT ![f].pc = "recv_fail_ring", ![f].env = "none",
+                        ![f].snap = recvW, ![f].contPc = "recv_fail_done"]
+  /\ recvW' = {}
+  /\ UNCHANGED << promoted, lq, reservedV, closed, sendW >>
+  /\ UNCHANGED rcVars /\ UNCHANGED notifVars /\ UNCHANGED schedVars
+  /\ UNCHANGED cntVars
+
+RecvFailDone(f) ==       \* the receive raises; the worker catches and retries.
+                         \* Failures are bounded (failLeft): a *persistently*
+                         \* failing receiver is an effectively-dead consumer,
+                         \* and parked senders behind it are the KEP's
+                         \* documented weakened-deadlock hang, not a bug the
+                         \* re-queue rule can or should repair.
+  /\ fst[f].pc = "recv_fail_done"
+  /\ fst' = [fst EXCEPT ![f].pc = "ready", ![f].failLeft = @ - 1]
+  /\ cur' = [cur EXCEPT ![Th(f)] = Idle]
+  /\ UNCHANGED chanVars /\ UNCHANGED rcVars /\ UNCHANGED notifVars
+  /\ UNCHANGED << started, tornDown >> /\ UNCHANGED cntVars
+
 RecvDeinit(f) ==         \* envelope.deinit(): the envelope's stub is released
   /\ fst[f].pc = "recv_deinit"
   /\ rc' = rc - (IF fst[f].env = "self" THEN 1 ELSE 0)
@@ -540,7 +574,7 @@ FiberNext(f) ==
   \/ SendFailLocked(f) \/ SendFailDeinit(f)
   \/ SendPush(f) \/ SendDone(f)
   \/ RecvPop(f) \/ RecvEOF(f) \/ RecvRegister(f) \/ ParkRecv(f)
-  \/ RecvCopyOut(f) \/ RecvDeinit(f)
+  \/ RecvCopyOut(f) \/ RecvCopyFail(f) \/ RecvFailDone(f) \/ RecvDeinit(f)
   \/ CloseLock(f) \/ CloseDone(f)
   \/ RingFlag(f) \/ RingFd(f) \/ RingDone(f)
 
@@ -576,7 +610,7 @@ TypeOK ==
        /\ fst[f].snap \subseteq Threads
        /\ fst[f].rt \in Threads \union {"none"}
        /\ fst[f].plainLeft \in Nat /\ fst[f].selfLeft \in Nat
-       /\ fst[f].recvLeft \in Nat
+       /\ fst[f].recvLeft \in Nat /\ fst[f].failLeft \in Nat
   /\ built \in Nat /\ pushed \in Nat /\ receivedCnt \in Nat
   /\ destroyDeinit \in Nat /\ failDeinit \in Nat
 
