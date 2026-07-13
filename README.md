@@ -46,6 +46,7 @@ Withdrawn   Rejected / Superseded
 | [0001](keps/0001-event-loop-reactor.md) | Event-Loop Reactor for Fiber I/O | Final | `kaappi` core |
 | [0002](keps/0002-cross-thread-channels.md) | Cross-Thread Channels and Multi-Core Fiber Scheduling | Accepted | `kaappi` core, `(kaappi parallel)` |
 | [0003](keps/0003-shared-flat-numeric-data.md) | Shared Flat Numeric Data | Draft | `kaappi` core, `(kaappi parallel)` |
+| [0004](keps/0004-discoverable-deviations.md) | Discoverable Deviations from R7RS-small | Draft | `kaappi` core, `kaappi.github.io` |
 
 ## License
 
