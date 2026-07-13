@@ -5,7 +5,7 @@
 | **KEP** | 0004 |
 | **Title** | Discoverable Deviations from R7RS-small |
 | **Author** | Baiju Muthukadan <baiju.m.mail@gmail.com> |
-| **Status** | Draft |
+| **Status** | Accepted |
 | **Type** | Standards |
 | **Target** | `kaappi` core (compiler, VM library loader), `kaappi.github.io` (new conformance page) |
 | **Created** | 2026-07-13 |
@@ -353,26 +353,58 @@ is, by KEP-0002's own admission, still finding correctness bugs in review.
 
 ## Implementation plan
 
-**Phase 0 — Evaluator unification (cleanup).** Route `evalFeatureReq` through
-`vm.vm_instance`; delete `known_libs` and `library_exists_checker`. Not
-gated on anything; pure simplification, verified by the existing `cond-
-expand` test suite (`tests_advanced.zig`, `tests_libraries.zig`).
+**Phase 0 — Evaluator unification (cleanup). Shipped:
+[kaappi#1488](https://github.com/kaappi/kaappi/pull/1488).** Not gated on
+anything; pure simplification, verified by the existing `cond-expand` test
+suite (`tests_advanced.zig`, `tests_libraries.zig`). Landed as designed in
+§2's revised form, not the original draft's `vm.vm_instance`-routing
+proposal: `vm.zig`'s `checkLibraryExists` callback and `vm_library.zig`'s
+`evalLibFeatureReq` now both call one shared
+`vm_library.libraryIsAvailable()` instead of each hand-writing the same
+check, and the redundant `known_libs` array is deleted outright. A
+follow-up review round on the same PR also closed a pre-existing sandbox
+gap in that shared function (`libraryIsAvailable` now returns `false`
+under `--sandbox` instead of probing the filesystem) — not part of the
+original Phase 0 scope, but a natural side effect of consolidating the
+two call sites.
 
-**Phase 1 — Base identifiers.** Add `kaappi-fibers`, `kaappi-reactor`,
-`kaappi-threads` to the feature table. Gated on Phase 0 only.
+**Phase 1 — Base identifiers. Shipped: [kaappi#1488](https://github.com/kaappi/kaappi/pull/1488).**
+Added `kaappi-fibers`, `kaappi-reactor`, `kaappi-threads` to
+`types.platform_features`, gated on `builtin.os.tag` at comptime (`kaappi-
+threads` omitted on `wasi`). Verified against a built binary and via
+`features-consistency.scm` (#1177), extended with the three new
+identifiers for Scheme-level parity with the Zig-side tests.
 
-**Phase 2 — `kaappi-shared-channels`.** Gated on KEP-0002's cross-thread
-wakeup (Phase 3) landing on `main` with its review findings resolved.
+**Phase 2 — `kaappi-shared-channels`. Still blocked, correctly.** Gated on
+KEP-0002's cross-thread wakeup (Phase 3) landing on `main` with its review
+findings resolved. Phase 3 itself shipped
+([kaappi#1485](https://github.com/kaappi/kaappi/pull/1485),
+[#1486](https://github.com/kaappi/kaappi/pull/1486)), but "review findings
+resolved" is not yet true: two bugs opened against the exact mechanism this
+identifier would advertise are still open —
+[kaappi#1487](https://github.com/kaappi/kaappi/issues/1487) (a dirty-
+snapshot dispatch hazard in `mutex-lock!`/`condition-variable-wait!`/
+`thread-sleep!`) and, more directly on point,
+[kaappi#1489](https://github.com/kaappi/kaappi/issues/1489) (a **permanent
+hang**: a local sibling send+receive during the `SharedChannelPoll` drive
+can disarm the notifier registration before park). This is precisely the
+gating scenario Motivation described in the abstract (the earlier
+unmerged-wakeup SIGABRT risk); #1489 is its concrete successor. Phase 2
+does not start until both are closed.
 
 **Phase 3 — `kaappi-shared-buffers`.** Gated on KEP-0003 reaching Accepted
-and shipping its own Phase 1.
+and shipping its own Phase 1. KEP-0003 is unchanged (Draft, skeleton, no
+code) as of this update.
 
-**Phase 4 — `conformance.md`.** Can start as soon as Phase 1 ships (the page
-doesn't need to wait for Phases 2–3 — it documents their KEP status as
-Accepted/Draft same as the KEPs README does today, and gains a "shipped"
-row for each subsystem as its identifier lands). Cross-link from
-`guide/concurrency.md` and `guide/srfi-support.md`; add the `About:` nav
-entry next to Stability.
+**Phase 4 — `conformance.md`. Shipped:
+[kaappi.github.io#5](https://github.com/kaappi/kaappi.github.io/pull/5).**
+New page linked from the `About:` nav next to Stability, cross-linked from
+`guide/concurrency.md` (a new admonition covering the Phase 2 caveat above)
+and `guide/srfi-support.md`. Documents cross-thread channels honestly as
+shipped-but-unhardened rather than waiting for Phase 2's gate to clear —
+the page's job is to state current reality, not just what has a `cond-
+expand` identifier yet.
 
 **Phase 5 (follow-up, not this KEP) — Runtime-variance predicates**, per
 Unresolved question 3, if real usage shows the gap matters in practice.
+Not started.
