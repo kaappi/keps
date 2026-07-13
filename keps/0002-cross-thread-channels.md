@@ -5,7 +5,7 @@
 | **KEP** | 0002 |
 | **Title** | Cross-Thread Channels and Multi-Core Fiber Scheduling |
 | **Author** | Baiju Muthukadan <baiju.m.mail@gmail.com> |
-| **Status** | Draft |
+| **Status** | Accepted |
 | **Type** | Standards |
 | **Target** | `kaappi` core (GC/scheduler/reactor/channels), new `(kaappi parallel)` library, with downstream effects on `kaappi-net`, `kaappi-http` |
 | **Created** | 2026-07-12 |
