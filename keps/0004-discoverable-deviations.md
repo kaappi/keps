@@ -200,19 +200,40 @@ process is worse than advertising nothing; this identifier is added only
 once KEP-0002's cross-thread wakeup is on `main` and its own review findings
 are resolved.
 
-### 2. Unify the two feature evaluators (cleanup, not a fix)
+### 2. Unify the two feature evaluators (cleanup, not a fix) — **implemented, revised from the original design**
 
-`evalFeatureReq` (compiler, no VM access, hardcoded `known_libs` fast path +
-`globals.libraryExists` callback fallback) and `evalLibFeatureReq`
-(`vm_library.zig:485`, direct `vm.libraries.get` access) do the same job
-through two code paths that happen to agree today only because of the
-callback indirection. Route both through the `vm.vm_instance` threadlocal
-([`vm.zig:25`](https://github.com/kaappi/kaappi/blob/55ccff0b/src/vm.zig#L25))
-— the same mechanism the GC root marker already relies on for compiler-time
-VM access — delete `known_libs`, and delete the now-redundant
-`library_exists_checker` indirection in `globals.zig` in favor of a direct
-call. One evaluator, one bare-symbol table (`types.platform_features` plus
-the new entries), no drift possible between the two call sites.
+The original draft of this section proposed routing the compiler's
+`evalFeatureReq` through the `vm.vm_instance` threadlocal directly, "the same
+mechanism the GC root marker already relies on." That claim didn't survive
+contact with the import graph: `vm.zig` imports `compiler.zig` (line 4), and
+`compiler.zig` reaches `compiler_conditionals.zig` via the `compiler_forms.zig`
+re-export hub — so `compiler_conditionals.zig` importing `vm.zig` directly
+would close a real cycle
+(`compiler_conditionals.zig → vm.zig → compiler.zig → compiler_forms.zig →
+compiler_conditionals.zig`). `globals.zig`'s own doc comment already said as
+much ("used by the compiler/expander for thread-safe globals access without
+importing vm.zig") — the callback indirection isn't incidental, it's the
+established way this codebase's compiler layer stays decoupled from `vm.zig`
+without fighting Zig's import resolution.
+
+What actually shipped instead: the two evaluators' `(library ...)` arms were
+never really doing different lookups — `vm.zig`'s `checkLibraryExists`
+(registered as the `globals.library_exists_checker` callback) and
+`vm_library.zig`'s `evalLibFeatureReq` both independently hand-wrote
+`vm.libraries.get(lib_name) != null` then a fallback to `libraryFileExists`.
+That two-line check is now one function,
+`vm_library.libraryIsAvailable(vm, lib_name, lib_name_list)`, called by both
+`checkLibraryExists` (compiler side, via the existing callback) and
+`evalLibFeatureReq` (define-library side, direct `*VM` access, no cycle
+there). `evalFeatureReq`'s `known_libs` array — verified empirically against
+a built binary to already be fully redundant, since `(cond-expand ((library
+(kaappi fibers)) ...))` and `(cond-expand ((library (srfi 18)) ...))` both
+resolved correctly *before* this change too, via the callback fallback the
+array never reached — is deleted outright rather than reconciled. Net effect:
+one implementation of "does this library exist" instead of two, reached
+through the two entry points the layering actually requires, with no new
+import edges. Regression tests lock in that `(kaappi fibers)` and `(srfi 18)`
+resolve correctly without the array (`tests_advanced.zig`).
 
 ### 3. The kaappi-lang.org page
 
