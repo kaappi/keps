@@ -291,6 +291,14 @@ decision belongs to the gate, not to this benchmark alone.
 **Lands in:** KEP-0002 UQ 1 resolution (Phase 7 confirms at scale);
 possibly a one-paragraph §1 amendment if (B) wins.
 
+**Decided (2026-07-14):** (C) ship — immediates 28–108× over the per-message
+struct, far past the ≥ 2× bar. (B) not adopted — the ≥ 30% clause is
+build-mode-sensitive and clause 2 (a real `shared_channel.zig` arena clean
+under gc-stress/leak) is unproven. (D) deferred to the KEP-0003 gate as
+pre-registered — implemented behind a flag and measured. Recorded in
+KEP-0002 UQ 1; no §1 amendment ((B) did not win). Evidence: kaappi#1535
+(A/B/C/D matrix), kaappi#1546 (gate harness + lever D).
+
 ---
 
 ## P4 — Deadlock-heuristic precision

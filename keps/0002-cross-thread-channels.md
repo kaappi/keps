@@ -1277,6 +1277,40 @@ the §9 accept-distribution measurement (P7).*
    reference in a process-wide side heap — BEAM's proven design for >64-byte
    binaries (see Prior art) — without breaking the no-shared-mutable
    invariant.
+
+   **Resolved (Phase 7, 2026-07-14).** Measured against the pre-registered
+   P3 criteria ([`research/open-problems.md`](../research/open-problems.md)
+   P3) with the envelope-cost A/B/C/D matrix (`src/bench_channel.zig`,
+   [kaappi#1535](https://github.com/kaappi/kaappi/pull/1535)) and the
+   `parallel-map` gate harness
+   ([kaappi#1546](https://github.com/kaappi/kaappi/pull/1546)); full
+   write-up in kaappi `docs/dev/kep-0002-phase7-envelope-benchmarks.md`.
+   These are the P3 "compare by eye" tier (§7); none of the three outcomes
+   turns on statistical precision.
+
+   - **(C) immediates skip the envelope — ship.** A fixnum message is 28×
+     (ReleaseFast) to 108× (ReleaseSafe) cheaper without the per-message GC
+     struct + root buffer, far past the pre-registered "≥ 2× on fixnums"
+     bar. Implemented in the real `send`/`receive` path behind
+     `-Dchannel-instrument` as gate lever `c`; promoting it to the
+     unconditional shipped default is a mechanical follow-up.
+   - **(B) reusable per-channel arena — not adopted; pending clause 2.** The
+     "≥ 30% on small messages" clause holds under the shipped ReleaseSafe
+     build (57–98%) but not under ReleaseFast (the 1 KiB string wins only
+     ~26%); more decisively, the second clause — a real arena inside
+     `shared_channel.zig` that survives the gc-stress/leak suite with **no
+     new lifetime rule visible outside that file** — is unproven (the
+     benchmark arena is symbol-free and does not settle it). Until a
+     prototype clears clause 2, the per-message GC struct (lever `none`)
+     stays.
+   - **(D) refcounted immutable side-heap — deferred to the KEP-0003 gate
+     ([kaappi#1474](https://github.com/kaappi/kaappi/issues/1474)),** as
+     pre-registered. Implemented behind the flag and measured: a bytevector
+     ≥ 4 KiB crosses by a refcounted `SharedBuffer` (`src/shared_buffer.zig`)
+     — zero-copy on receive, copy-on-write on mutation (2.6–2.8× on a 64 KiB
+     bytevector even at 1:1 fan-out, and ~10× less parent-side result-copy
+     time on the gate's `ip-band`). Whether it *ships* is the gate's call,
+     on the Phase 7 `share` dataset, not this benchmark's.
 2. **Deadlock heuristic precision.** §2's rejection of foreign-owned
    handles means every legal user of a `SharedChannel` holds a counted
    stub, so per-channel `refcount > 1` is by itself a sound "another
