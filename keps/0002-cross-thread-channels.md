@@ -1008,18 +1008,22 @@ threshold of 3, the criterion fires and the userspace fd-distributor
 fallback is implemented; Linux keeps the plain kernel-balanced path.
 
 Two facts the implementation surfaced, recorded here so §9 matches what
-shipped. First, the fallback's workers do **not** multiplex connections with
-fibers: a secondary thread that parks on `channel-receive` does not run its
-other ready fibers (blocking receive freezes the thread; a zero-timeout poll
-raises), so each worker handles one blocking connection at a time and
-Darwin concurrency is the worker count, not threads × fibers. The Linux
-path keeps the full model (each thread's own reactor, its own fibers). The
-per-worker-fiber gap on the fallback path is a runtime limitation, not a
-design choice — a candidate for a future core change, not a v1 blocker.
-Second, the shipped signature is `(http-listen-parallel handler port
-[thread-count [host]])` — *handler first* — to match the four existing
-`http-listen-*` procedures, rather than the port-first order sketched
-above.
+shipped. First, the fallback keeps the **full threads × fibers model** — each
+worker fiber-multiplexes its connections just like the Linux path. The one
+constraint that shapes *how* is that a secondary thread which **blocks** in
+`channel-receive` does not run its other ready fibers, so a worker cannot
+block-receive the next fd and still serve the ones it holds. The workers
+therefore **poll** the fd channel with a zero timeout and yield with
+`thread-sleep!` (which does dispatch sibling fibers) between polls; a spawned
+handler fiber per fd then runs during those yields. Polling also keeps the
+hand-off off the cross-thread-wakeup path entirely. (An earlier draft of this
+section claimed the fallback was limited to worker-count concurrency; that was
+an artifact of a stale build, corrected here — verified multiplexing:
+20 concurrent requests with a 100 ms handler across 2 workers complete in
+~0.3 s, not ~1 s.) Second, the shipped signature is
+`(http-listen-parallel handler port [thread-count [host]])` — *handler first*
+— to match the four existing `http-listen-*` procedures, rather than the
+port-first order sketched above.
 
 ## Drawbacks
 
