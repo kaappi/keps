@@ -995,6 +995,32 @@ carry only the shutdown signal. This slots into the server-model table from
 KEP-0001's motivation as the fourth entry: *threads × fibers = cores ×
 thousands of connections*.
 
+**Measured (Phase 6, [kaappi#1471](https://github.com/kaappi/kaappi/issues/1471)).**
+The accept-distribution harness (P7,
+[`kaappi-net/research/reuseport-accept-distribution/`](https://github.com/kaappi/kaappi-net/tree/main/research/reuseport-accept-distribution))
+ran N ∈ {2, 4, 8, cores} listeners on one `SO_REUSEPORT` port against
+M = 10 000 short-lived connections. **Linux** (kernel 6.8, x86_64) spread
+accepts near-uniformly — max/min per-listener ratio 1.03–1.14, chi-squared
+2.31–15.55. **Darwin** (25.5.0, aarch64) put **100 % of connections on the
+last-bound socket** at every N (max/min = ∞). The reputation is exactly
+right. Since Darwin's ratio at N = cores (∞) exceeds the pre-registered
+threshold of 3, the criterion fires and the userspace fd-distributor
+fallback is implemented; Linux keeps the plain kernel-balanced path.
+
+Two facts the implementation surfaced, recorded here so §9 matches what
+shipped. First, the fallback's workers do **not** multiplex connections with
+fibers: a secondary thread that parks on `channel-receive` does not run its
+other ready fibers (blocking receive freezes the thread; a zero-timeout poll
+raises), so each worker handles one blocking connection at a time and
+Darwin concurrency is the worker count, not threads × fibers. The Linux
+path keeps the full model (each thread's own reactor, its own fibers). The
+per-worker-fiber gap on the fallback path is a runtime limitation, not a
+design choice — a candidate for a future core change, not a v1 blocker.
+Second, the shipped signature is `(http-listen-parallel handler port
+[thread-count [host]])` — *handler first* — to match the four existing
+`http-listen-*` procedures, rather than the port-first order sketched
+above.
+
 ## Drawbacks
 
 - **Two copies per message** (in to envelope, out to receiver). This is the
