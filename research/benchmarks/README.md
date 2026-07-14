@@ -19,6 +19,42 @@ started, the thresholds and gate-relevant definitions are frozen; a
 defect discovered mid-run voids the run, fixes the protocol, and starts
 over. That is the cost of being able to trust the classification.
 
+**Amendments (pre-freeze).** Ordinary PRs per the rule above — each made
+*before* data collection started, from what the Phase 7 harness
+([kaappi#1546](https://github.com/kaappi/kaappi/pull/1546)) surfaced
+during bring-up, noting what moved and why. None touches a threshold:
+
+- **2026-07-15 — FO-TREE nodes: records → 4-slot vectors.** A
+  `define-record-type` instance cannot cross a Kaappi channel and stay
+  usable: `deepCopy` mints a fresh record *type* per envelope, so a copied
+  node no longer matches the top-level type its accessors close over
+  (record-type identity is not interned the way symbols are). §1's FO-TREE
+  node becomes a 4-slot vector `#(left right tag count)` — same tree shape
+  and the same symbol-heavy `tag`, so the §1 symbol-table measurement is
+  unchanged; only the node container moves from a record to a vector.
+  Revisit if record-type identity is ever made to survive the copy.
+- **2026-07-15 — lever D scope: bytevectors only, no source promotion.**
+  §2's side-heap ships for **bytevectors** only; large *strings* are a
+  deferred follow-up (no gate workload carries one). And D elides the
+  zero-copy *receive* of a distinct payload but does not promote a plain
+  *source* bytevector to shared on first send, so a fan-out of the same
+  plain bytevector still snapshots per task envelope. That touches only
+  FO-DIGEST (the one bytevector fan-out), which is compute-dominated, so
+  the classification is unaffected. Flonum-vector (IP-MAP, IP-MATMUL,
+  FO-SLICE) and tree (FO-TREE) payloads are byte-opaque and correctly
+  untouched by D — that walk tax is exactly the pre-KEP-0003 reality being
+  measured.
+- **2026-07-15 — IP-MATMUL sizes capped at 64 KiB and 1 MiB.** The kernel
+  is interpreted O(M³); at 8 MiB (M ≈ 724) and 64 MiB (M = 2048) the
+  multiply count (~4·10⁸ and ~9·10⁹) makes the cell computationally
+  infeasible at §4 iteration counts, and compute so dominates wall time
+  that `share` collapses toward zero for reasons unrelated to copy — a
+  contaminated cell, not a signal. IP-MATMUL therefore runs only 64 KiB
+  and 1 MiB; IP-BAND and IP-MAP still run all four sizes, so every `IP-*`
+  workload keeps a size ≥ 1 MiB (what Rule 1 requires) and the
+  DRAM-bound copy-domination signal is carried by the two O(size)
+  workloads that can actually reach it.
+
 ## 1. Workloads
 
 Six workloads (three per shape) plus two controls. "Copy-semantics
@@ -32,14 +68,14 @@ encoding's time is copy machinery.
 |----|---------|-------------|------------------------|
 | `IP-BAND` | RGBA byte image, `bytevector` of 4·W·H bytes | each worker renders a disjoint horizontal band (per-pixel arithmetic, no neighbor reads) | task carries band spec; worker returns its band as a fresh bytevector; parent `bytevector-copy!`s each into the output |
 | `IP-MAP` | vector of flonums (NaN-boxed — Kaappi has no flat f64 storage pre-KEP-0003; that walk tax is part of what is being measured) | `out[i] = a·x[i] + b` over a disjoint chunk | task carries the chunk (copied in); worker returns the transformed chunk; parent `vector-copy!`s into place |
-| `IP-MATMUL` | two f64 square matrices (vectors of flonums, row-major) | blocked matrix multiply: each worker computes a disjoint block of C, reading all of A and B | tasks carry A and B (fan-in copy) plus block spec; worker returns its C block; parent assembles |
+| `IP-MATMUL` | two f64 square matrices (vectors of flonums, row-major); *64 KiB and 1 MiB sizes only, see Amendments* | blocked matrix multiply: each worker computes a disjoint block of C, reading all of A and B | tasks carry A and B (fan-in copy) plus block spec; worker returns its C block; parent assembles |
 
 ### Read-only fan-out
 
 | Id | Payload | Computation | Copy-semantics encoding |
 |----|---------|-------------|------------------------|
 | `FO-DIGEST` | `bytevector` | each worker computes an 8-byte checksum of the whole payload | payload copied to every worker; result is a fixnum pair |
-| `FO-TREE` | record tree: balanced binary tree of records, each node `(make-node left right tag count)` with `tag` a symbol — symbol-heavy on purpose (measures the §1 shared-symbol-table lock alongside) | each worker counts nodes matching a tag over the whole tree | tree copied to every worker; result is a fixnum |
+| `FO-TREE` | balanced binary tree of nodes, each node a 4-slot vector `#(left right tag count)` with `tag` a symbol — symbol-heavy on purpose (measures the §1 shared-symbol-table lock alongside); *amended from records, see Amendments* | each worker counts nodes matching a tag over the whole tree | tree copied to every worker; result is a fixnum |
 | `FO-SLICE` | vector of flonums | each worker sums only its assigned index range — but receives the **whole** vector (the over-copying idiom `parallel-map` naturally produces) | whole payload copied per worker; result is a flonum |
 
 ### Controls
@@ -58,14 +94,16 @@ matrices combined), not the result.
 Axes:
 
 - **Size:** 64 KiB, 1 MiB, 8 MiB, 64 MiB (log-spaced; spans
-  L2-resident to DRAM-bound on both reference machines).
+  L2-resident to DRAM-bound on both reference machines). IP-MATMUL is
+  the sole exception — 64 KiB and 1 MiB only (see Amendments).
 - **Workers `w`:** 1, 2, 4, 8, 2×cores.
 - **Elision levers** (from [P3](../open-problems.md), which Phase 7's
   A/B/C/D harness implements): `none` (per-message envelopes as
   specified), `C` (immediates — fixnums/booleans/chars — skip the
   envelope heap), `C+D` (plus the refcounted immutable side-heap for
-  large bytevectors/strings, implemented **behind a flag** — its
-  shipping decision belongs to this gate, not to P3's benchmark).
+  large **bytevectors**, implemented **behind a flag** — its shipping
+  decision belongs to this gate, not to P3's benchmark; strings deferred,
+  no plain-source promotion, see Amendments).
 
 **Gate cells** (full statistics discipline, §4): the three `IP-*`
 workloads × all four sizes × `w = 8` × levers `C+D`; plus the same
