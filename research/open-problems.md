@@ -495,6 +495,15 @@ N = cores, implement the §9 fallback (acceptor thread + fd fixnums over
 a shared channel); otherwise document the measured skew and ship the
 plain `SO_REUSEPORT` path everywhere.
 
+**Resolved (kaappi#1471).** Harness in
+[`kaappi-net/research/reuseport-accept-distribution/`](https://github.com/kaappi/kaappi-net/tree/main/research/reuseport-accept-distribution).
+M = 10 000, N ∈ {2, 4, 8, 12}. Linux (kernel 6.8): near-uniform, max/min
+1.03–1.14, chi-squared 2.31–15.55. Darwin (25.5.0, aarch64): 100 % of
+connections on the last-bound socket at every N, max/min = ∞. ∞ > 3 at
+N = cores ⇒ criterion fires ⇒ the userspace fd-distributor fallback is
+implemented; Linux keeps the kernel-balanced path. Full numbers in the
+harness README and cross-linked into KEP-0002 §9.
+
 **Lands in:** KEP-0002 §9 / Phase 6; `kaappi-net` implementation choice.
 
 ---
