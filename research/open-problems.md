@@ -20,7 +20,7 @@ alongside DOIs where they exist.*
 
 | # | Problem | Owner | When | Stakes |
 |---|---------|-------|------|--------|
-| P1 | Racing element-access semantics | KEP-0003 UQ 2 | before KEP-0003 Phase 1 | highest — wrong answer is UB or a gutted fast path |
+| P1 | Racing element-access semantics | KEP-0003 UQ 2 | **resolved** (kaappi#1473) — the hybrid | highest — wrong answer is UB or a gutted fast path |
 | P2 | Concurrency-protocol verification | KEP-0002 §§2, 4–6 | before KEP-0002 Phase 1 | highest leverage — bugs found here never reach Zig |
 | P3 | Envelope cost & copy elision | KEP-0002 UQ 1 | with KEP-0002 Phase 1 | perf only; design is correct either way |
 | P4 | Deadlock-heuristic precision | KEP-0002 UQ 2 | KEP-0002 Phase 3 | UX of hangs vs. errors |
@@ -36,28 +36,47 @@ phases. P6 and P7 are bounded and parked.
 
 ## P1 — Racing element-access semantics for shared buffers
 
-**Problem (KEP-0003 UQ 2).** "Are plain aligned loads/stores enough, or
-must element access compile to `.unordered` atomics to prevent the
-optimizer from inventing tears? Do we offer any `Atomics`-style ordered
-subset (`shared-buffer-cas!`), or is 'channels are the only ordering'
-the permanent answer?"
+**Status: RESOLVED (2026-07-15) — the hybrid.** Method step 1 is the
+constraints memo [`p1-access-semantics.md`](p1-access-semantics.md); method
+step 2 is the codegen experiment in the kaappi repo (kaappi#1473), whose report
+applies the pre-registered criteria below verbatim. The constraint analysis
+(IR-level chapter-and-verse for why plain accesses are unsound) is in the memo
+and the numbers are in the report; this section keeps the problem statement, the
+pre-registered criteria, the resolution, and the reading list, and points at
+those two artifacts for the detail.
 
-**Why it is hard.** The adversary is the compiler, not the CPU. Racing
-*plain* accesses are undefined behavior at the LLVM IR level regardless
-of what aarch64/x86_64 guarantee, so "aligned loads don't tear on our
-platforms" is not by itself a sound argument — the optimizer may cache,
-duplicate, or invent loads. The safe encoding (`unordered`/`monotonic`
-atomics) is exactly what LLVM's own guidance recommends for Java-like
-"racy but memory-safe" languages, but atomic accesses inhibit
-auto-vectorization — potentially gutting the numeric inner loops this
-KEP exists to serve. JavaScript's `SharedArrayBuffer` and WebAssembly's
-shared memory faced the identical dilemma and chose access-atomic,
-unordered semantics with *bounded* nondeterminism (racing plain accesses
-return some written value, never fire-the-machine UB) — the closest
-published precedent for KEP-0003's "untorn, unordered, memory-safe"
-wording, including its formal repair history.
+**Problem (KEP-0003 UQ 2).** Are plain aligned loads/stores enough, or must
+element access compile to `.unordered` atomics to stop the optimizer inventing
+tears? Any `Atomics`-style ordered subset (`shared-buffer-cas!`), or is
+"channels are the only ordering" the permanent answer?
 
-**Reading list.**
+**Decision criteria (pre-registered).** If `unordered` element access costs
+< 10 % on the vectorizable kernels, take it unconditionally (full memory-safety,
+no caveats). If it costs more, adopt the hybrid and require the guide to state
+the overlapping-slices caveat in its first paragraph. Plain-accesses-everywhere
+is rejected *a priori* on Boehm 2011 grounds. An `Atomics`-style ordered subset
+is out of scope for v1.
+
+**Resolution.** The experiment measured `unordered` element access costing
+**+55 % to +2747 %** (bootstrap-CI lower bounds) versus plain on every
+vectorizable kernel, compiled through Kaappi's own `zig cc -O2` pipeline —
+auto-vectorization loss, with the `memset`/`memcpy` libcall idioms gapping
+widest (~29×) — far past the 10 % threshold that would have made per-access
+`unordered` free. The criteria therefore select the **hybrid**: interpreter
+primitives use `unordered` (free at dispatch scale — the same machine
+instruction, unobservable against ~107 ns/call VM dispatch); the LLVM backend
+compiles `-ref`/`-set!` plain, soundness carried by KEP-0002 channel
+happens-before edges, with three containments (debug/`--gc-stress` builds
+compile `unordered`; disjointness-checked `(kaappi parallel)` slice helpers;
+per-element blast radius) and the guide's DRF caveat in its first paragraph.
+`monotonic` is dominated by `unordered`; no `Atomics` subset in v1. This is now
+normative in
+[KEP-0003 §Reference-level design](../keps/0003-shared-flat-numeric-data.md)
+(Unresolved question 2, resolved). Full record: the constraints memo above and
+the kaappi#1473 experiment report
+(`docs/dev/kep-0003-access-semantics-experiment.md`).
+
+**Reading list (retained).**
 
 - Boehm & Adve, *Foundations of the C++ Concurrency Memory Model*,
   PLDI 2008 — why catch-fire semantics for races was chosen; the
@@ -93,54 +112,6 @@ wording, including its formal repair history.
 - Normative, non-paper: [LLVM Atomics guide](https://llvm.org/docs/Atomics.html)
   (`unordered` is documented as intended for Java-style racy loads) and
   Zig's `@atomicLoad`/`@atomicStore` orderings, which map onto it.
-
-**Method.**
-1. Constraints memo: what each candidate (plain / `unordered` /
-   `monotonic` / hybrid "plain within a task's slice, fences at channel
-   edges") promises and forbids, in the vocabulary of the JS/Wasm models.
-2. Codegen experiment on aarch64 + x86_64: the KEP-0003 Motivation
-   kernels (fill, map, reduction over `f64`) compiled via Kaappi's LLVM
-   backend under each encoding; measure vectorization loss directly.
-3. If `unordered` costs are unacceptable and plain is unsound, evaluate
-   the hybrid: plain accesses inside a worker's slice justified by a
-   no-concurrent-access argument at the *protocol* level (slices handed
-   out via channels; the channel edge is the fence) — i.e., move the
-   soundness burden from every access to the hand-off, and document
-   overlapping-slice races as the one remaining hole.
-
-**Decision criteria (pre-registered).** If `unordered` element access
-costs < 10% on the vectorizable kernels, take it unconditionally (full
-memory-safety, no caveats). If it costs more than that, adopt the hybrid
-and require the guide to state the overlapping-slices caveat in its
-first paragraph. Plain-accesses-everywhere is rejected *a priori* on
-Boehm 2011 grounds. An `Atomics`-style ordered subset is out of scope
-for v1 either way; revisit only with a concrete user demand.
-
-**Lands in:** KEP-0003 Reference-level design (access semantics become
-normative) + UQ 2 resolution. The codegen experiment is a follow-up work
-item in the kaappi repo (needs the LLVM backend).
-
-**Status (2026-07-12).** Method step 1 is done: the constraints memo is
-[`research/p1-access-semantics.md`](p1-access-semantics.md). Highlights:
-plain accesses are rejected with IR-level chapter and verse (LLVM's
-NotAtomic contract returns `undef` under races and licenses load
-re-introduction — the bounds-check/index split breaks VM memory safety
-even for flat data); `unordered` implements KEP-0003's promise in
-LLVM's own words ("races produce somewhat sane results instead of
-having undefined behavior") at zero instruction cost; codegen probes
-(clang/LLVM 22.1.7) observe the real cost — the loop vectorizer refuses
-atomics at every ordering including `unordered` (8 doubles/iteration
-gap on the fill kernel), and the memset/memcpy libcall idiom is
-prohibited for `unordered` too, so the u8 kernels may gap wider than
-the f64 ones. The hybrid is precisely scoped, including the guide
-sentence it would weaken and three containments (debug builds compile
-accesses `unordered`; disjointness-checked slice helpers; per-element
-blast radius). Step 2's protocol is refined: validate that the plain
-baseline vectorizes under Kaappi's own backend pipeline before
-measuring (Zig 0.16's default pipeline did not vectorize even the plain
-probe), add integer-reduction and memset-idiom kernels, and interpret
-"vectorizable kernels" as ceiling-validated ones. The decision itself
-waits on step 2 in the kaappi repo, per the pre-registered criteria.
 
 ---
 
@@ -524,12 +495,13 @@ harness README and cross-linked into KEP-0002 §9.
    repo: the P1 constraints memo (method step 1) and the P5
    `research/benchmarks/` spec; KEP-0002 Phase 1 implementation moves
    to the kaappi repo.
-2. P1 codegen/vectorization micro-benchmark — kaappi repo (needs the
-   LLVM backend). Protocol refined in
-   [`p1-access-semantics.md`](p1-access-semantics.md) §9: confirm the
-   plain baseline vectorizes under Kaappi's pipeline first, add
-   u8 memset/memcpy-idiom and integer-reduction kernels, measure the
-   interpreter-tier control.
+2. ~~P1 codegen/vectorization micro-benchmark — kaappi repo (needs the
+   LLVM backend).~~ Done (kaappi#1473): the plain baseline vectorizes/idiom-izes
+   under Kaappi's `zig cc -O2` pipeline on 5 of 6 kernels, `unordered` goes
+   scalar on all, costing +55 %–+2747 %; the criteria select the hybrid. See
+   P1's resolved status block and the kaappi#1473 experiment report. The
+   x86_64-linux *timing* leg (codegen evidence already cross-compiled and
+   agreeing) is a documented follow-up in that report.
 3. P3 envelope A/B/C/D harness — kaappi repo, part of KEP-0002 Phase 1.
 4. ~~P5 `research/benchmarks/` workload matrix spec — this repo, before
    Phase 7.~~ Done — [`benchmarks/README.md`](benchmarks/README.md);

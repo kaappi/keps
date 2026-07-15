@@ -179,10 +179,19 @@ The rules a user must know:
   (`shared-f64vector`). You cannot store a pair, string, or channel in
   one — the type admits no reference, which is what keeps the GC model
   intact.
-- **Element access is memory-safe but unordered.** Reads and writes are
-  bounds-checked and never tear (an element is a single aligned machine
-  access), but two threads racing on the same index get no ordering
-  guarantee — the race is *your* nondeterminism, not undefined behavior.
+- **Element access is untorn and unordered — for race-free programs.**
+  Reads and writes are bounds-checked and never tear (an element is a single
+  aligned machine access). Two tasks that reach a buffer through a channel
+  handshake see each other's writes across that edge, and any residual race
+  *across a channel edge* is your nondeterminism. But two tasks racing on the
+  same element with **no channel edge between them** — overlapping slices,
+  hand-rolled indices — are a data race the native compiler may miscompile:
+  undefined behavior, not merely nondeterminism (the hybrid encoding, P1
+  step 2). Write disjoint ranges and let a channel carry "done" (the blessed
+  idiom below); debug and `--gc-stress` builds compile every access
+  `unordered`, so a race under test surfaces as wrong numbers, never a
+  corrupted VM. The shared-buffer guide's first paragraph must state this
+  DRF proviso.
 - **Channels are the synchronization.** A value received on a channel
   happens-after everything the sender did before sending (the channel
   mutex provides the edge). "Write your slice, then send done" is the
@@ -289,14 +298,49 @@ decisions are recorded, the mechanics are TODO]**
   marking, no tracing, no cross-heap reachability. The stub is an
   ordinary heap object with no traceable fields — exactly a promoted
   channel's shape (KEP-0002 §2).
-- **Element access semantics (normative sketch).** Each `-ref`/`-set!`
-  compiles to a single aligned load/store of the element width. On all
-  supported targets (aarch64, x86_64, riscv64) aligned accesses ≤ 8
-  bytes do not tear. No ordering is implied between racing accesses;
-  the happens-before story is delegated to channel operations
-  (KEP-0002 §4's mutex) and `thread-join!`. Whether the implementation
-  must use Zig `@atomicLoad/@atomicStore(.unordered)` to keep the
-  optimizer honest, or plain accesses suffice, is Unresolved question 2.
+- **Element access semantics (normative — the hybrid).** Each
+  `-ref`/`-set!` compiles to a single aligned load/store of the element
+  width. On all supported targets (aarch64, x86_64, riscv64) aligned
+  accesses ≤ 8 bytes do not tear. No ordering is implied between racing
+  accesses; the happens-before story is delegated to channel operations
+  (KEP-0002 §4's mutex) and `thread-join!`. **Resolved (P1 step 2, the
+  codegen experiment kaappi#1473):** access encoding is the **hybrid**,
+  not per-access atomics.
+  - **Interpreter primitives use Zig `@atomicLoad/@atomicStore(.unordered)`
+    unconditionally.** An aligned `unordered` access lowers to the *same
+    machine instruction* as a plain one, and the annotation is
+    unobservable against VM dispatch (measured: a real
+    `bytevector-u8-ref`/`-set!` is ~107 ns/call; the atomic annotation adds
+    a sub-nanosecond fraction). Full memory safety, no caveat, at this tier.
+  - **The LLVM native backend compiles `-ref`/`-set!` to *plain* accesses.**
+    Soundness shifts from per-access to whole-program: KEP-0003's semantics
+    hold for executions data-race-free at element granularity, with
+    happens-before supplied by KEP-0002 (envelope push/pop under the
+    `SharedChannel` mutex + the §5 notifier `acq_rel` protocol — the edge
+    structure the P2 model checks). For race-free programs, behavior is
+    indistinguishable from `unordered`; a program racing on the same element
+    with no channel edge is a data race the native compiler may miscompile
+    (LLVM-level UB). This buys back exactly the fast path per-access atomics
+    forecloses — the experiment measured `unordered` element access costing
+    **+55 % to +2747 %** (bootstrap-CI lower bounds) versus plain on every
+    vectorizable kernel (auto-vectorization loss; the `memset`/`memcpy`
+    libcall idioms gap widest, ~29× on `u8` fill), far past the
+    pre-registered 10 % threshold that would have made per-access
+    `unordered` free.
+  - **Containments (normative):** (1) debug and `--gc-stress` builds compile
+    every access `unordered` regardless — races stay *defined* in exactly the
+    builds that hunt corruption, so a misbehaving program under test yields
+    wrong numbers, not a corrupted VM; (2) the `(kaappi parallel)` slice
+    helpers (Phase 3) take disjoint ranges by construction and assert
+    disjointness at submission time, confining the UB surface to hand-rolled
+    index arithmetic; (3) the blast radius is *per element* — distinct
+    elements never interfere (false sharing is a performance topic, not a
+    correctness one). `monotonic` is rejected as dominated by `unordered`
+    (same measured cost, weaker optimizer freedom, over-promises per-location
+    coherence this contract does not want). An `Atomics`-style ordered subset
+    (`shared-buffer-cas!`) stays out of scope for v1. Rationale and numbers:
+    [`research/p1-access-semantics.md`](../research/p1-access-semantics.md)
+    and the kaappi#1473 experiment report.
 - **`deepCopy` arm.** `.shared_buffer` aliases: allocate a stub on the
   target heap, `refcount += 1` — identical shape to the promoted-channel
   arm, minus promotion (a shared buffer is born shared; there is no
@@ -306,10 +350,16 @@ decisions are recorded, the mechanics are TODO]**
   C FFI libraries (`kaappi-net`, `kaappi-pg`) can read/write it with
   zero copies — a `shared-bytevector` is a natural I/O buffer. Rules for
   lifetime across an FFI call: TODO.
+- **Bounds-check hoisting (normative, from P1 step 2).** To realize the plain
+  fast path the hybrid buys, the backend's `-ref`/`-set!` lowering must present
+  the vectorizer a counted loop with a raw element GEP and a *hoisted* bounds
+  check (standard loop-invariant check motion) — a per-iteration trap the
+  optimizer cannot remove would under-vectorize the plain baseline itself. The
+  kaappi#1473 experiment measured the ceiling this requirement targets.
 - **TODO:** exact type surface (§ Unresolved 1), `write`
   representation, `equal?` semantics, slice objects or offsets-only,
-  interaction with `--gc-stress`, sandbox-mode policy, bounds-check
-  elision in loops.
+  sandbox-mode policy. (`--gc-stress` interaction is resolved: compile accesses
+  `unordered` — containment 1 above.)
 
 ## Drawbacks
 
@@ -421,7 +471,8 @@ would. Designing the buffer type now keeps that door open.
 
 ## Unresolved questions
 
-*Question 2 has a research plan (P1), and the acceptance gate has
+*Question 2 is **resolved** by the P1 step-2 codegen experiment
+(kaappi#1473 — the hybrid; see §Reference); the acceptance gate has
 pre-registered decision criteria (P5), in
 [`research/open-problems.md`](../research/open-problems.md).*
 
@@ -432,11 +483,18 @@ pre-registered decision criteria (P5), in
    copies); subtyping is vastly more ergonomic for FFI-adjacent code.
    Which element kinds at launch — bytes + f64 only, or the full SRFI-4
    family?
-2. **Access semantics, precisely.** Are plain aligned loads/stores
-   enough, or must element access compile to `.unordered` atomics to
-   prevent the optimizer from inventing tears? Do we offer any
-   `Atomics`-style ordered subset (`shared-buffer-cas!`), or is "channels
-   are the only ordering" the permanent answer?
+2. **Access semantics, precisely.** *Resolved (P1 step 2 — the codegen
+   experiment kaappi#1473): the **hybrid**.* Interpreter primitives use
+   `@atomicLoad/@atomicStore(.unordered)` unconditionally (free at dispatch
+   scale); the LLVM backend compiles `-ref`/`-set!` to plain accesses, with
+   soundness carried by KEP-0002's channel happens-before edges and the three
+   containments in §Reference. Per-access `unordered` everywhere was rejected
+   because it costs +55 %–+2747 % on vectorizable kernels (pre-registered
+   threshold: 10 %); plain-everywhere stays rejected *a priori* (Boehm 2011);
+   `monotonic` is dominated; an `Atomics`-style ordered subset
+   (`shared-buffer-cas!`) is out of scope for v1. See the §Reference normative
+   sketch, [`research/p1-access-semantics.md`](../research/p1-access-semantics.md),
+   and the kaappi#1473 experiment report.
 3. **Relationship to KEP-0002 UQ 1.** Should immutable refcounted
    payloads (the Erlang lever) and mutable shared buffers (this KEP) be
    one mechanism with a mutability flag, or two types? One mechanism
