@@ -47,7 +47,7 @@ Withdrawn   Rejected / Superseded
 | [0002](keps/0002-cross-thread-channels.md) | Cross-Thread Channels and Multi-Core Fiber Scheduling | Accepted | `kaappi` core, `(kaappi parallel)` |
 | [0003](keps/0003-shared-flat-numeric-data.md) | Shared Flat Numeric Data | Draft | `kaappi` core, `(kaappi parallel)` |
 | [0004](keps/0004-discoverable-deviations.md) | Discoverable Deviations from R7RS-small | Accepted | `kaappi` core, `kaappi.github.io` |
-| [0005](keps/0005-diagnostic-contract.md) | The Diagnostic Contract | Draft | `kaappi` core, `kaappi.github.io` |
+| [0005](keps/0005-diagnostic-contract.md) | The Diagnostic Contract | Accepted | `kaappi` core, `kaappi.github.io` |
 
 ## License
 
