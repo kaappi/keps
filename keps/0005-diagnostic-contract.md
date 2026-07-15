@@ -5,7 +5,7 @@
 | **KEP** | 0005 |
 | **Title** | The Diagnostic Contract |
 | **Author** | Baiju Muthukadan <baiju.m.mail@gmail.com> |
-| **Status** | Draft |
+| **Status** | Accepted |
 | **Type** | Standards |
 | **Target** | `kaappi` core (reader, compiler, VM, primitives), `kaappi.github.io` (new diagnostics reference page) |
 | **Created** | 2026-07-13 |
@@ -288,7 +288,12 @@ a `Standards`-type KEP.
 - **Signature.** `(error-object-code obj)` returns an **interned symbol** (e.g.
   `KP3001`) for an error object the implementation raised with a code; `#f`
   otherwise. `eq?` on the returned symbol is the intended dispatch primitive
-  (fast, and reads naturally in a `guard`).
+  (fast, and reads naturally in a `guard`). As shipped
+  ([kaappi#1508](https://github.com/kaappi/kaappi/pull/1551)) it is a **total
+  function that never raises** — unlike `error-object-message` /
+  `error-object-irritants`, which type-error on a non-error object — so it is
+  safe as a `guard`'s *first* dispatch check, where `raise` may have delivered
+  any value at all.
 - **`#f` cases, explicitly.** A user error from `(error msg irritant …)` →
   `#f`. A raised non-error object — R7RS `raise` accepts *any* value
   ([`primitives_control.zig:40`](https://github.com/kaappi/kaappi/blob/ce6656c7/src/primitives_control.zig#L40))
@@ -308,8 +313,8 @@ a `Standards`-type KEP.
   materializes the interned symbol from the ordinal on demand.
 - **Home library.** A new `(kaappi diagnostics)` library, **never** an extension
   of `(scheme base)`'s exports (that would be a real deviation — a non-standard
-  binding in a standard library's namespace). Final name is Unresolved
-  question 4.
+  binding in a standard library's namespace). The name `(kaappi diagnostics)` is
+  settled (Unresolved question 4, resolved).
 - **Feature identifier.** `kaappi-diagnostics` is added to
   `types.platform_features` following KEP-0004 §1's mechanism exactly, true when
   the registry and accessor are compiled in.
@@ -446,16 +451,49 @@ raw material already in the tree.
    range-predicate helper (e.g. "any read error") so programs aren't hardcoding
    individual numbers? Leaning toward shipping the symbol plus a small set of
    range predicates that mirror the existing `read-error?`/`file-error?`.
+
+   **Resolved (Phase 4, 2026-07-15,
+   [kaappi#1508](https://github.com/kaappi/kaappi/pull/1551)).** Ship the
+   interned symbol only. `eq?` against a literal `'KP3001` is the v1 dispatch
+   primitive; range predicates are deliberately *not* shipped yet. They remain a
+   purely additive future extension — a `(kaappi diagnostics)` `read-error-code?`
+   / stage predicate can be added later without touching the accessor or the
+   codes, so nothing forecloses them. The existing `read-error?` / `file-error?`
+   stay expressed over `ErrorObject.error_type` for now.
 2. **User-attachable codes.** May a program tag its own `(error …)` with a code,
    and if so in what namespace (certainly not `KP`)? Deferred; `#f` for all user
    errors is the conservative v1.
+
+   **Resolved (Phase 4, 2026-07-15).** Accepted as deferred: v1 ships `#f` for
+   every user `(error …)`, and the `KP` namespace stays reserved to the
+   implementation. Whether user code may attach codes (in some non-`KP`
+   namespace) is left to a future KEP; the additive `#f`-for-uncoded contract
+   does not preclude it.
 3. **Granularity, concretely.** "One code per user-distinguishable condition" is
    the principle, but the first pass must draw actual lines — is `(car 5)` vs.
    `(car "x")` one type-error code or two? Proposed: one code per
    (primitive-agnostic) *expected-type violation*, with the offending value in
    the message, not the code. To be settled during Phase 1.
+
+   **Resolved (Phase 1,
+   [kaappi#1504](https://github.com/kaappi/kaappi/pull/1534)).** The first pass
+   draws the line coarsely: a single `type-error` code (`KP3002`) covers every
+   expected-type violation, with the procedure, the expected type, and the
+   offending value carried in the *message*, not the code (likewise one code
+   each for arity, index-out-of-bounds, etc.). Finer fan-out — a distinct code
+   per expected-type — stays available with no renumbering: the registry is a
+   curated namespace independent of the internal `KaappiError` enum (see
+   "Alternatives considered"), exactly so a coarse code can later split without
+   breaking the ones already shipped.
 4. **Library name.** `(kaappi diagnostics)` vs. folding the accessor into an
    existing `(kaappi …)` library. Genuinely open.
+
+   **Resolved (Phase 4, 2026-07-15,
+   [kaappi#1508](https://github.com/kaappi/kaappi/pull/1551)).** `(kaappi
+   diagnostics)` — a dedicated library, not folded into an existing one. The
+   accessor is its sole export today, leaving room for the code-range predicates
+   of question 1 (and any later diagnostic-introspection surface) to land in the
+   same library. `kaappi-diagnostics` is the matching `cond-expand` identifier.
 5. **SARIF as an additional CI format.** `--diagnostics=json` is LSP-shaped for
    editor/agent parity; CI security/quality tooling often speaks
    [SARIF](https://sariftool.github.io/) instead. Worth a second
@@ -471,6 +509,15 @@ raw material already in the tree.
    but should `error-object-code` ever return one — i.e. should a program be able
    to `guard` on "the compiler hit a bug"? Leaning no (ICEs abort; encouraging
    programs to depend on them is wrong), but the code still exists for the report.
+
+   **Resolved (Phase 4, 2026-07-15).** No dedicated carve-out, and in practice
+   unobservable: the accessor simply reads whatever code rode on the object, but
+   the `KP9xxx` conditions do not deliver a caught coded error object to a
+   `guard` — an internal-compiler-error aborts, and an out-of-memory cannot
+   allocate the error object it would need to hand to the handler. So programs
+   cannot come to depend on `guard`-ing an ICE, without the accessor having to
+   special-case the `KP9xxx` range. Left as an observation rather than an
+   enforced rule, since #1514 (the crash-report path) has not shipped.
 
 ## Implementation plan
 
