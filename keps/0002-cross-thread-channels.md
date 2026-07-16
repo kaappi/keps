@@ -1311,6 +1311,30 @@ the §9 accept-distribution measurement (P7).*
      bytevector even at 1:1 fan-out, and ~10× less parent-side result-copy
      time on the gate's `ip-band`). Whether it *ships* is the gate's call,
      on the Phase 7 `share` dataset, not this benchmark's.
+
+     **Called (2026-07-16): does not ship.** The gate dataset
+     (kaappi#1474, evaluated on both reference machines) reads
+     `cd` ≈ `none` on every gate cell: D elides only *bytevector*
+     copies, and every workload where copy dominates is byte-opaque to
+     it — flonum vectors (IP-MAP at 22–28 % share, FO-SLICE at
+     45–65 %) and a vector tree (FO-TREE at 66–79 %) are exactly the
+     walk-tax payloads a byte side-heap cannot share — while the two
+     bytevector workloads leave D nothing to win end-to-end (FO-DIGEST
+     is compute-dominated, under 2 % share everywhere; IP-BAND is
+     render/reassembly-bound, so the zero-copy receive shaves only a
+     few points). The micro-benchmark wins above are real but never
+     surface as end-to-end `share` on the registered suite. The
+     implementation is kept, not deleted: it stays behind
+     `-Dchannel-instrument` as gate lever `d`, because any KEP-0003
+     gate re-run ([kaappi#1596](https://github.com/kaappi/kaappi/issues/1596))
+     must measure both lever settings. Revisit on field evidence of a
+     copy-dominated large-*bytevector* fan-out or pipeline hot loop —
+     the demand shape D actually serves, absent from the registered
+     suite — either directly under this bullet or folded into KEP-0003
+     UQ 3 (one mechanism vs. two) if that KEP's gate ever opens.
+     Reading: the gate worksheet
+     (`docs/dev/kep-0003-acceptance-gate-worksheet.md`, "Lever D barely
+     moves the needle").
 2. **Deadlock heuristic precision.** §2's rejection of foreign-owned
    handles means every legal user of a `SharedChannel` holds a counted
    stub, so per-channel `refcount > 1` is by itself a sound "another

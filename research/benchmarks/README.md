@@ -272,6 +272,17 @@ metadata) — compute-dominated, under 2% share at every collected size
 on both machines, classification-neutral. The filled §6 worksheet is
 `docs/dev/kep-0003-acceptance-gate-worksheet.md` in the kaappi repo.
 
+The same dataset settles the one decision §7 assigns to the gate:
+**lever D does not ship.** Both machines read `cd` ≈ `none` on every
+cell — the payloads where copy dominates (flonum vectors, the FO-TREE
+vector tree) are byte-opaque to a bytevector side-heap (the
+pre-KEP-0003 walk tax), and the two bytevector workloads leave D
+nothing end-to-end (FO-DIGEST compute-dominated, IP-BAND
+reassembly-bound). The side-heap stays behind `-Dchannel-instrument`
+as gate lever `d` — any re-run of this protocol needs both lever
+settings — rather than becoming a shipped default. Full statement and
+revisit condition: KEP-0002 UQ 1 (D).
+
 This section records a result; §§1–7 stay as frozen. One deviation
 from §5's outcome-4 action (gate issue stays open): the maintainer
 deliberately closed kaappi#1474 along with the epic kaappi#1465 and
