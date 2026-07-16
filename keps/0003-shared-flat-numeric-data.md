@@ -53,9 +53,15 @@
 > One deviation from §5's outcome-4 action (which leaves the gate
 > issue open): the maintainer deliberately closed kaappi#1474, the
 > epic kaappi#1465, and the gated implementation issue kaappi#1475 —
-> recorded as a maintainer call in their closing comments — so the
-> revisit trigger lives in the worksheet, and firing it opens fresh
-> issues rather than reopening those.
+> recorded as a maintainer call in their closing comments. The
+> successor trackers those comments promised (kaappi#1596 — path to
+> Accepted; kaappi#1597 — implementation-to-release) were opened
+> 2026-07-16 and deliberately retired the same day: an open issue
+> reads as actionable work, and this KEP's only next step is waiting
+> on field evidence. The standing record is
+> [Path to `Accepted`](#path-to-accepted-revisit-protocol) at the end
+> of this document; firing the trigger opens fresh kaappi/kaappi
+> issues rather than reopening any of the retired ones.
 
 *The benchmark in the Motivation was run on macOS aarch64 (Apple
 Silicon), ReleaseSafe, at kaappi commit
@@ -571,8 +577,10 @@ classification only when both reference machines agree — disagreement
 means the KEP stays gated. **Evaluated 2026-07-16: Between, by
 two-machine agreement (kaappi#1474).** Neither branch fires — the
 demand is neither Racket-shaped nor Erlang-shaped/absent — so Phases
-1–4 below stay gated behind the revisit trigger. Numbers, record, and
-the trigger: the gate note at the top of this KEP.
+1–4 below stay gated behind the revisit trigger. Numbers and record:
+the gate note at the top of this KEP; the trigger and the re-run
+procedure: [Path to `Accepted`](#path-to-accepted-revisit-protocol)
+below.
 
 **Phase 1 — `SharedBuffer` core.** The type, stubs, refcounting on the
 Phase 0 protocol; `-ref`/`-set!` with the §Reference access semantics;
@@ -589,3 +597,70 @@ worked example in `kaappi-examples`.
 **Phase 4 — Measurement.** Re-run the Motivation benchmark plus the
 fan-out and in-place workloads; publish the copy-vs-share crossover
 sizes; decide Unresolved question 4 (transfer variant) with numbers.
+
+## Path to `Accepted` (revisit protocol)
+
+*This section is the standing tracker for this KEP's lifecycle — the
+KEP is a living document until `Final`, and "waiting on evidence" is
+KEP state, not actionable work, so it lives here rather than in an
+open issue. The tracking issues kaappi#1596 (path to Accepted) and
+kaappi#1597 (implementation-to-release) promised by kaappi#1474's and
+kaappi#1475's closing comments were opened 2026-07-16 and retired the
+same day in favor of this section; their bodies are preserved in the
+closed issues.*
+
+In order:
+
+1. **The revisit trigger fires.** Real application traces — from
+   `kaappi-examples` or an equivalent field report — exhibiting an
+   `IP-*`-shaped hot loop: N workers producing disjoint slices of one
+   large (≥ 1 MiB) flat numeric output (image tiles, matrix blocks,
+   chunked map over a numeric column), or in-place demand that copy
+   semantics cannot express at any cost. Synthetic kernels do not
+   qualify; "Between" specifically left the gate waiting on *field*
+   evidence. A qualifying report is a fresh issue on kaappi/kaappi
+   citing this KEP, trace/profile attached (`kaappi-examples` has
+   issues disabled, so reports cannot land there).
+2. **Fresh gate re-run under the same frozen thresholds.** Protocol:
+   [`research/benchmarks/README.md`](../research/benchmarks/README.md)
+   §5 — the thresholds are not renegotiated (§8 records the first
+   evaluation; a trigger firing buys a re-run, not a rule change). The
+   campaign is turnkey per the worksheet: `benchmarks/gate/run-gate.py`
+   + `classify.py`, the Kalibera–Jones floor, `w = 8`, **both lever
+   settings**, on both reference machines (macOS aarch64, Linux
+   x86_64).
+3. **Classification reads Racket-shaped on both machines:** with
+   levers `C+D` on, ≥ 2 of the 3 `IP-*` workloads with `share ≥ 25 %`
+   at some size ≥ 1 MiB, CI lower bound clearing the threshold. Attach
+   the filled §6 worksheet to the status PR (a reading, not an
+   argument).
+4. **Complete the KEP, then the status PR.** Fill the `[skeleton]`
+   sections and settle the remaining unresolved questions — UQ 1 (type
+   surface), UQ 3 (one mechanism or two), UQ 5 (slices), plus the
+   reference-level TODOs (`write` representation, `equal?` semantics,
+   FFI lifetime rules, sandbox-mode policy); UQ 2 is already resolved
+   (the hybrid, kaappi#1473). Open the status PR: Draft → `Accepted`,
+   update the README index annotation, and open per-phase
+   implementation issues in kaappi/kaappi (scope: the Implementation
+   plan above, as carried by the retired kaappi#1597).
+
+If the re-run reads otherwise:
+
+| Re-run outcome (both machines) | Action |
+|---|---|
+| Racket-shaped | Step 4 — `Accepted` |
+| Erlang-shaped | Status PR: Draft → `Rejected` in favor of Alternative 1 (refcounted immutable payloads, a KEP-0002 UQ 1 follow-up) |
+| Absent | Status PR: Draft → `Rejected` (both designs); revisit only with new field evidence |
+| Between (or machine disagreement) | Stays gated; log the run below and keep waiting |
+
+### Revisit log
+
+| Date | Check | Outcome |
+|---|---|---|
+| 2026-07-16 | First gate evaluation (kaappi#1474): pre-registered campaign, both reference machines | **Between**, by two-machine agreement — stays gated. Record: kaappi/keps#25; datasets kaappi#1549 (macOS) / kaappi#1580 (Linux) |
+| 2026-07-16 | Trigger check: systematic survey of `kaappi-examples` @ `aaeff1a` (all 13 apps), adjacent numeric repos (`kaappi-math`, `kaappi-mpl`), and the field-report channels | **Not fired** — no `IP-*` shape anywhere; the one parallel workload (parallel-primes) is a scalar reduction moving ~100 B cross-thread. [Baseline survey](https://github.com/kaappi/kaappi/issues/1596#issuecomment-4991123187) for future checks to diff against |
+
+Future trigger checks diff `kaappi-examples` (and new numeric ecosystem
+apps) against the baseline survey — the latent candidate shapes are a
+rasterizer/plotting backend or a chunked numeric-column workload —
+and append a row here either way.

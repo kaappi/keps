@@ -1467,7 +1467,8 @@ the §9 accept-distribution measurement (P7).*
      surface as end-to-end `share` on the registered suite. The
      implementation is kept, not deleted: it stays behind
      `-Dchannel-instrument` as gate lever `d`, because any KEP-0003
-     gate re-run ([kaappi#1596](https://github.com/kaappi/kaappi/issues/1596))
+     gate re-run (per
+     [KEP-0003's revisit protocol](0003-shared-flat-numeric-data.md#path-to-accepted-revisit-protocol))
      must measure both lever settings. Revisit on field evidence of a
      copy-dominated large-*bytevector* fan-out or pipeline hot loop —
      the demand shape D actually serves, absent from the registered
