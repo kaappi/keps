@@ -133,12 +133,12 @@ documented §1 cycle leak instead of a destroy-at-zero deinit, making
 | `core_cap4_waitres` | amended, both failure modes | safety | **pass** ✓ | 1,607,571 |
 | `core_cap1_recvfail` | amended, receive failures, capacity 1 | safety + liveness | **pass** ✓ | 5,260,378 |
 | `core_cap1_waitres` | amended, send failures, capacity 1 | safety + liveness | **pass** ✓ | 945,608 |
-| `rv_flipall`† | rendezvous, send failures | safety + liveness | **pass** ✓ | RVFLIP |
-| `rv_recvfail`† | rendezvous, receive failures | safety + liveness | **pass** ✓ | RVRECV |
+| `rv_flipall`† | rendezvous, send failures | safety + liveness | **pass** ✓ | 1,071,005 |
+| `rv_recvfail`† | rendezvous, receive failures | safety + liveness | **pass** ✓ | 1,962,624 |
 | `rv_noring`† | **demand growth without the sender ring** | safety + liveness | **fail** — Finding 4 | ~0.4k* |
-| `rv2_popwithdraw`‡ | rendezvous, withdraw-at-pop | safety + liveness | **pass** ✓ | RV2PASS |
+| `rv2_popwithdraw`‡ | rendezvous, withdraw-at-pop | safety + liveness | **pass** ✓ | 5,004 |
 | `rv2_popwindow`‡ | **token counted through the pop window** | safety + liveness | **fail** — Finding 5 | ~5k* |
-| `rva_atomic`‡ | rendezvous, atomic timeout-withdraw | safety + liveness | **pass** ✓ | RVAPASS |
+| `rva_atomic`‡ | rendezvous, atomic timeout-withdraw | safety + liveness | **pass** ✓ | 3,691 |
 | `rva_naive`‡ | **withdraw racing an in-flight reservation** | safety + liveness | **fail** — Finding 6 | ~3k* |
 
 \* states explored before the violation stopped the search; varies
