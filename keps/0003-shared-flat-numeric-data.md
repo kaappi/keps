@@ -25,6 +25,37 @@
 > [`research/benchmarks/`](../research/benchmarks/README.md) (P5);
 > thresholds frozen 2026-07-12, before any Phase 7 code or numbers
 > exist.
+>
+> **Gate evaluated — 2026-07-16, outcome 4 (Between): stays gated.**
+> Phase 7 ran the pre-registered campaign and
+> [kaappi#1474](https://github.com/kaappi/kaappi/issues/1474) applied
+> the protocol's §5 rule mechanically; **both reference machines read
+> Between independently** (genuine agreement, not the cross-machine
+> fallback). Racket-shaped failed: only `IP-MAP` cleared the 25 %
+> CI-lower share bound (26.0 % [25.7, 26.3] at 64 MiB on macOS
+> aarch64; 8 MiB and 64 MiB on Linux x86_64) where the rule needs 2 of
+> 3 `IP-*` workloads. Erlang-shaped and Absent failed: `IP-MAP`,
+> `FO-TREE` (69.9–72.4 % share on macOS), and `FO-SLICE` (52.7–57.0 %)
+> sit far above the 10 % upper bound at both lever settings, with
+> Linux reading the same three offenders. Lever D barely moves those
+> cells (`cd` ≈ `none`): the high-share payloads are byte-opaque
+> flonum vectors and trees a bytevector side-heap cannot share — so
+> the copy pain that exists today is the *walk tax* on boxed fan-out,
+> not the in-place wall this carve-out exists for, and it did not
+> reach pre-registered strength in the `IP-*` shape. This KEP
+> therefore stays **Draft**; the sections marked **[skeleton]** stay
+> skeletal. Revisit trigger (§5 outcome 4): real `kaappi-examples`
+> traces exhibiting an `IP-*`-shaped hot loop — which fires a fresh
+> gate re-run under the same frozen thresholds, not a renegotiation.
+> Record: datasets and classifier in kaappi#1549 (macOS) and
+> kaappi#1580 (Linux); the filled mechanical worksheet is
+> `docs/dev/kep-0003-acceptance-gate-worksheet.md` in the kaappi repo.
+> One deviation from §5's outcome-4 action (which leaves the gate
+> issue open): the maintainer deliberately closed kaappi#1474, the
+> epic kaappi#1465, and the gated implementation issue kaappi#1475 —
+> recorded as a maintainer call in their closing comments — so the
+> revisit trigger lives in the worksheet, and firing it opens fresh
+> issues rather than reopening those.
 
 *The benchmark in the Motivation was run on macOS aarch64 (Apple
 Silicon), ReleaseSafe, at kaappi commit
@@ -143,8 +174,12 @@ this KEP *now* — before that evidence — has one concrete payoff: the
 shared-object machinery KEP-0002 builds for channels (refcount protocol,
 stubs, `deepCopy` aliasing, leak discipline) is this KEP's substrate, and
 specifying both against one generic protocol while KEP-0002 is still
-Draft avoids a retrofit later (Phase 0). Acceptance still waits for the
-evidence; see the gate above.
+Draft avoids a retrofit later (Phase 0). Acceptance waited for the
+evidence, and the evidence has since arrived: the gate note above
+records the 2026-07-16 evaluation — outcome **Between**, neither the
+in-place demand at pre-registered strength nor a copy cost that
+elision dissolves — so the wait continues with a concrete trigger
+rather than a date.
 
 ## Guide-level explanation
 
@@ -472,9 +507,12 @@ would. Designing the buffer type now keeps that door open.
 ## Unresolved questions
 
 *Question 2 is **resolved** by the P1 step-2 codegen experiment
-(kaappi#1473 — the hybrid; see §Reference); the acceptance gate has
-pre-registered decision criteria (P5), in
-[`research/open-problems.md`](../research/open-problems.md).*
+(kaappi#1473 — the hybrid; see §Reference). The acceptance gate's
+pre-registered criteria (P5, in
+[`research/open-problems.md`](../research/open-problems.md)) have been
+**evaluated**: 2026-07-16, outcome Between, stays gated — see the gate
+note at the top. Questions 1 and 3–5 remain open and gated with the
+rest of the KEP.*
 
 1. **Type surface.** Distinct disjoint types (`shared-bytevector?` ⇒
    `bytevector?` is `#f`, Racket-style) or subtypes that answer `#t` to
@@ -519,7 +557,9 @@ release, destroy-at-zero, leak/gc-stress discipline) with `SharedChannel`
 as its first instance and `SharedBuffer` as the declared second. Pure
 specification; no code beyond what KEP-0002's phases already build. This
 is the only part of this KEP that is *not* gated — it must land while
-KEP-0002 §1 is still cheap to reword.
+KEP-0002 §1 is still cheap to reword. **(Done:** KEP-0002 §1 specifies
+the generic protocol and names this KEP's buffers the declared second
+instance; `src/shared_object.zig` shipped with KEP-0002 Phase 1.)
 
 **Gate check.** KEP-0002 Phase 7 `parallel-map` data answers: is the
 pinch fan-out copies (→ prefer Alternative 1, immutable payloads), the
@@ -528,7 +568,11 @@ both, revisit later)? Evaluated mechanically per the pre-registered
 protocol in [`research/benchmarks/`](../research/benchmarks/README.md):
 overhead shares with confidence intervals on the named gate cells, and
 classification only when both reference machines agree — disagreement
-means the KEP stays gated.
+means the KEP stays gated. **Evaluated 2026-07-16: Between, by
+two-machine agreement (kaappi#1474).** Neither branch fires — the
+demand is neither Racket-shaped nor Erlang-shaped/absent — so Phases
+1–4 below stay gated behind the revisit trigger. Numbers, record, and
+the trigger: the gate note at the top of this KEP.
 
 **Phase 1 — `SharedBuffer` core.** The type, stubs, refcounting on the
 Phase 0 protocol; `-ref`/`-set!` with the §Reference access semantics;
