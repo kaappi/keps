@@ -21,18 +21,30 @@
 (* refcount transitions.  Fibers of one thread are serialized by cur[t]    *)
 (* (cooperative scheduling: primitives have no fiber switch points).       *)
 (*                                                                         *)
+(* Rendezvous (capacity 0, the kaappi#1600/#1601 amendment): Cap = 0 is   *)
+(* a rendezvous channel — send admission is bounded by rvDemand, the      *)
+(* count of receivers currently committed to the channel (each holds one  *)
+(* demand token, acquired idempotently at its park decision and released  *)
+(* on every terminal exit).  A receiver whose registration grows the      *)
+(* demand also snapshot-and-rings send_waiters: new demand is a send-side *)
+(* event.  RvRing = "noring" keeps the rejected no-ring variant as a      *)
+(* regression witness (Finding 4: both senders park before any receiver   *)
+(* commits; without the ring nothing ever wakes them).                    *)
+(*                                                                         *)
 (* Scoped out (see README.md): notifier refcounts/alive flag (no thread    *)
-(* exits mid-model), §6 timeouts, local-channel capacity pre-promotion,    *)
+(* exits mid-model), §6 timeouts (incl. the rendezvous delivery-wins and   *)
+(* reservation-drain timeout rules), local-channel capacity pre-promotion, *)
 (* the §5 deadlock heuristic (P4), equality/identity (UQ 4).               *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
 CONSTANTS
-  Cap,          \* channel capacity; >= total sends models "unbounded"
+  Cap,          \* channel capacity; >= total sends models "unbounded";
+                \* 0 = rendezvous (admission bounded by receiver demand)
   SweepPolicy,  \* "selective" (§5 as written: flip only if ready-for-it)
                 \* | "flip_all" (candidate repair: flip every parked shared waiter)
   FailCopy,     \* TRUE: the §4 step-9 copy-failure branch is reachable
-  Scenario,     \* "core" | "strand"  (fiber scripts; see README)
+  Scenario,     \* "core" | "strand" | "rv"  (fiber scripts; see README)
   EofPolicy,    \* "asis"               (pre-amendment §4 step 6: EOF when
                 \*     drained ∧ closed — REJECTED, Finding 2)
                 \* | "wait_reserved_naive" (EOF additionally waits for
@@ -40,16 +52,21 @@ CONSTANTS
                 \* | "wait_reserved"    (same, plus the §4 failure path also
                 \*     rings recv_waiters when closed — the AMENDED normative
                 \*     text)
-  RecvFail      \* TRUE: the receive-side copy-out can fail; the amended §4
+  RecvFail,     \* TRUE: the receive-side copy-out can fail; the amended §4
                 \* re-queues the envelope at the head and rings recv_waiters
                 \* ("receive fails => nothing received")
+  RvRing        \* "ring"   (normative: a registration that grows rvDemand
+                \*     snapshot-and-rings send_waiters)
+                \* | "noring" (REJECTED, Finding 4: demand grows silently —
+                \*     parked senders are never woken)
 
-ASSUME Cap \in Nat \ {0}
+ASSUME Cap \in Nat
 ASSUME SweepPolicy \in {"selective", "flip_all"}
 ASSUME FailCopy \in BOOLEAN
-ASSUME Scenario \in {"core", "strand"}
+ASSUME Scenario \in {"core", "strand", "rv"}
 ASSUME EofPolicy \in {"asis", "wait_reserved_naive", "wait_reserved"}
 ASSUME RecvFail \in BOOLEAN
+ASSUME RvRing \in {"ring", "noring"}
 
 Threads == {"t0", "t1", "t2"}
 Fibers  == {"f0a", "f0b", "f1", "f2"}
@@ -65,14 +82,22 @@ Idle    == "idle"
 (*         f1:  1 self send;   f2: 2 receives.                             *)
 (* strand: the §8 shutdown race — f1: 1 plain send; f0b, f2: receive       *)
 (*         until EOF; f0a: promote -> hand-offs -> close (racing f1).      *)
+(* rv:     rendezvous (Cap = 0) — no preload (nothing can be queued        *)
+(*         without demand); f0a: promote -> hand-offs -> 1 plain send ->   *)
+(*         close; f1: 1 self send; f0b, f2: 1 receive each (f0b may park   *)
+(*         locally pre-promotion, exercising token-carrying migration).    *)
+(*         Sends = receive budgets, so NoAbandonedTask must hold.          *)
 PreloadSelf   == Scenario = "core"
 PlainSends(f) == CASE Scenario = "core"   -> (IF f = "f0a" THEN 1 ELSE 0)
                    [] Scenario = "strand" -> (IF f = "f1"  THEN 1 ELSE 0)
+                   [] Scenario = "rv"     -> (IF f = "f0a" THEN 1 ELSE 0)
 SelfSends(f)  == CASE Scenario = "core"   -> (IF f = "f1"  THEN 1 ELSE 0)
                    [] Scenario = "strand" -> 0
+                   [] Scenario = "rv"     -> (IF f = "f1"  THEN 1 ELSE 0)
 RecvBudget(f) == CASE Scenario = "core"   -> (CASE f = "f0b" -> 1 [] f = "f2" -> 2
                                                 [] OTHER -> 0)
                    [] Scenario = "strand" -> (IF f \in {"f0b", "f2"} THEN 2 ELSE 0)
+                   [] Scenario = "rv"     -> (IF f \in {"f0b", "f2"} THEN 1 ELSE 0)
 UntilEOF(f)   == Scenario = "strand" /\ f \in {"f0b", "f2"}
 Closer(f)     == f = "f0a"
 
@@ -84,6 +109,11 @@ VARIABLES
   reservedV,    \* §4 slots claimed by in-flight sends
   closed,
   recvW, sendW, \* notifier lists: SUBSET Threads (set = §7 dedup, one entry/thread)
+  rvDemand,     \* rendezvous demand (Cap = 0 only): committed receivers'
+                \* outstanding tokens; the send-admission bound. Lives with
+                \* the channel (ch.rv_demand locally, SharedChannel.rv_demand
+                \* once promoted — promotion carries it, which one shared
+                \* variable models directly)
   \* shared-object protocol (§1)
   rc,           \* SharedChannel.refcount
   held,         \* [Threads -> Nat]: counted stubs on each thread's heap
@@ -98,13 +128,13 @@ VARIABLES
   \* envelope-fate counters (P-3/P-4/P-5 invariants)
   built, pushed, receivedCnt, destroyDeinit, failDeinit
 
-chanVars  == << promoted, lq, queue, reservedV, closed, recvW, sendW >>
+chanVars  == << promoted, lq, queue, reservedV, closed, recvW, sendW, rvDemand >>
 rcVars    == << rc, held, destroyed >>
 notifVars == << wakeP, fdR >>
 schedVars == << cur, started, tornDown >>
 cntVars   == << built, pushed, receivedCnt, destroyDeinit, failDeinit >>
-vars == << promoted, lq, queue, reservedV, closed, recvW, sendW, rc, held,
-           destroyed, wakeP, fdR, cur, started, tornDown, fst,
+vars == << promoted, lq, queue, reservedV, closed, recvW, sendW, rvDemand,
+           rc, held, destroyed, wakeP, fdR, cur, started, tornDown, fst,
            built, pushed, receivedCnt, destroyDeinit, failDeinit >>
 
 Msg == {"plain", "self"}
@@ -115,14 +145,14 @@ PCs == {"ready", "h1", "h2",
         "send_fail_locked", "send_fail_ring", "send_fail_deinit",
         "recv_preparked", "recv_parked", "recv_wake",
         "recv_ring", "recv_copyout", "recv_deinit",
-        "recv_fail_ring", "recv_fail_done",
+        "recv_fail_ring", "recv_fail_done", "recv_demand_ring",
         "lrecv_preparked", "lrecv_parked",
         "close_ring", "close_done"}
 
 Init ==
   /\ promoted = FALSE /\ lq = << >>
   /\ queue = << >> /\ reservedV = 0 /\ closed = FALSE
-  /\ recvW = {} /\ sendW = {}
+  /\ recvW = {} /\ sendW = {} /\ rvDemand = 0
   /\ rc = 0 /\ held = [t \in Threads |-> 0] /\ destroyed = FALSE
   /\ wakeP = [t \in Threads |-> FALSE] /\ fdR = [t \in Threads |-> FALSE]
   /\ cur = [t \in Threads |-> Idle]
@@ -141,7 +171,7 @@ Init ==
           failLeft |-> IF RecvBudget(f) > 0 THEN 1 ELSE 0,
           preloadLeft |-> IF f = "f0a" THEN p ELSE 0,
           closeLeft |-> IF Closer(f) THEN 1 ELSE 0,
-          eof |-> FALSE]]
+          eof |-> FALSE, hasTok |-> FALSE]]
   /\ built = 0 /\ pushed = 0 /\ receivedCnt = 0
   /\ destroyDeinit = 0 /\ failDeinit = 0
 
@@ -162,8 +192,13 @@ FiberDone(f) ==
 AllDone == \A f \in Fibers : FiberDone(f)
 AllTorn == \A t \in Threads : tornDown[t]
 
+(* Send-admission bound: static capacity, or — rendezvous (Cap = 0) — the  *)
+(* current receiver demand.  Everything downstream (SendFull/SendReserve/  *)
+(* ReadySend) is the unchanged §4 protocol against this bound.             *)
+Bound == IF Cap = 0 THEN rvDemand ELSE Cap
+
 ReadyRecv == Len(queue) > 0 \/ closed
-ReadySend == Len(queue) + reservedV < Cap \/ closed
+ReadySend == Len(queue) + reservedV < Bound \/ closed
 ReadyFor(f) == CASE fst[f].pc = "recv_parked" -> ReadyRecv
                  [] fst[f].pc = "send_parked" -> ReadySend
                  [] OTHER -> FALSE
@@ -175,14 +210,15 @@ ReadyFor(f) == CASE fst[f].pc = "recv_parked" -> ReadyRecv
 (* cur[t] held — they execute inside the primitive on the ringer's thread. *)
 
 RingPcs == {"send_ring", "send_fail_ring", "recv_ring", "recv_fail_ring",
-            "close_ring"}
+            "close_ring", "recv_demand_ring"}
 
 RingFlag(f) ==
   /\ fst[f].pc \in RingPcs /\ fst[f].rt = "none" /\ fst[f].snap # {}
   /\ \E u \in fst[f].snap :
        /\ wakeP' = [wakeP EXCEPT ![u] = TRUE]
        /\ fst' = [fst EXCEPT ![f].rt = u]
-  /\ UNCHANGED << promoted, lq, queue, reservedV, closed, recvW, sendW >>
+  /\ UNCHANGED << promoted, lq, queue, reservedV, closed, recvW, sendW,
+                  rvDemand >>
   /\ UNCHANGED rcVars /\ UNCHANGED fdR /\ UNCHANGED schedVars
   /\ UNCHANGED cntVars
 
@@ -204,22 +240,27 @@ RingDone(f) ==
 (* Pre-promotion local operations (t0 only; today's lock-free path).       *)
 
 LocalPreloadSend(f) ==   \* f0a's local (channel-send ch ch) before any thread exists;
-                         \* a local send wakes local waiters (wakeChannelWaiters)
+                         \* a local send wakes local waiters (wakeChannelWaiters).
+                         \* Only the core scenario preloads, never with Cap = 0
+                         \* (a rendezvous local send would need local demand).
   /\ f = "f0a" /\ fst[f].pc = "ready" /\ fst[f].preloadLeft = 1 /\ ~promoted
   /\ cur["t0"] = Idle
   /\ lq' = Append(lq, "self")
   /\ fst' = [fst EXCEPT ![f].preloadLeft = 0,
                !["f0b"].pc = IF fst["f0b"].pc = "lrecv_parked"
                                THEN "ready" ELSE fst["f0b"].pc]
-  /\ UNCHANGED << promoted, queue, reservedV, closed, recvW, sendW >>
+  /\ UNCHANGED << promoted, queue, reservedV, closed, recvW, sendW, rvDemand >>
   /\ UNCHANGED rcVars /\ UNCHANGED notifVars /\ UNCHANGED schedVars
   /\ UNCHANGED cntVars
 
-LocalRecvPop(f) ==       \* f0b receives on the local representation
+LocalRecvPop(f) ==       \* f0b receives on the local representation; a value in
+                         \* hand releases any demand token this wait acquired
   /\ f = "f0b" /\ fst[f].pc = "ready" /\ fst[f].recvLeft > 0 /\ ~fst[f].eof
   /\ ~promoted /\ cur["t0"] = Idle /\ lq # << >>
   /\ lq' = Tail(lq)
-  /\ fst' = [fst EXCEPT ![f].recvLeft = fst[f].recvLeft - 1]
+  /\ rvDemand' = rvDemand - (IF fst[f].hasTok THEN 1 ELSE 0)
+  /\ fst' = [fst EXCEPT ![f].recvLeft = fst[f].recvLeft - 1,
+                        ![f].hasTok = FALSE]
   /\ UNCHANGED << promoted, queue, reservedV, closed, recvW, sendW >>
   /\ UNCHANGED rcVars /\ UNCHANGED notifVars /\ UNCHANGED schedVars
   /\ UNCHANGED cntVars
@@ -232,11 +273,17 @@ LocalRecvParkA(f) ==     \* empty local queue: enter the primitive, decide to pa
   /\ UNCHANGED chanVars /\ UNCHANGED rcVars /\ UNCHANGED notifVars
   /\ UNCHANGED << started, tornDown >> /\ UNCHANGED cntVars
 
-LocalRecvParkB(f) ==     \* park under the local waiting_on protocol
+LocalRecvParkB(f) ==     \* park under the local waiting_on protocol; on a
+                         \* rendezvous channel the park is the commitment
+                         \* point: acquire the demand token (idempotent —
+                         \* a woken-and-reparked fiber already holds one)
   /\ fst[f].pc = "lrecv_preparked"
-  /\ fst' = [fst EXCEPT ![f].pc = "lrecv_parked"]
+  /\ rvDemand' = rvDemand + (IF Cap = 0 /\ ~fst[f].hasTok THEN 1 ELSE 0)
+  /\ fst' = [fst EXCEPT ![f].pc = "lrecv_parked",
+                        ![f].hasTok = (Cap = 0) \/ fst[f].hasTok]
   /\ cur' = [cur EXCEPT !["t0"] = Idle]
-  /\ UNCHANGED chanVars /\ UNCHANGED rcVars /\ UNCHANGED notifVars
+  /\ UNCHANGED << promoted, lq, queue, reservedV, closed, recvW, sendW >>
+  /\ UNCHANGED rcVars /\ UNCHANGED notifVars
   /\ UNCHANGED << started, tornDown >> /\ UNCHANGED cntVars
 
 (* Exits from lrecv_parked: a local send wakes the waiter (it retries and  *)
@@ -268,7 +315,10 @@ Promote(f) ==
        ELSE /\ recvW' = recvW
             /\ fst' = [fst EXCEPT ![f].pc = "h1"]
   /\ cur' = [cur EXCEPT !["t0"] = f]
-  /\ UNCHANGED << reservedV, closed, sendW >> /\ UNCHANGED destroyed
+  \* rvDemand carries over unchanged: promoteChannel copies ch.rv_demand
+  \* into the SharedChannel (one shared variable models the copy), so a
+  \* token acquired at a pre-promotion local park stays counted.
+  /\ UNCHANGED << reservedV, closed, sendW, rvDemand >> /\ UNCHANGED destroyed
   /\ UNCHANGED notifVars /\ UNCHANGED << started, tornDown >>
   /\ UNCHANGED << receivedCnt, destroyDeinit, failDeinit >>
 
@@ -312,12 +362,13 @@ SendClosed(f) ==         \* §4 step 2: raise "send on closed channel"
   /\ UNCHANGED chanVars /\ UNCHANGED rcVars /\ UNCHANGED notifVars
   /\ UNCHANGED schedVars /\ UNCHANGED cntVars
 
-SendFull(f) ==           \* §4 steps 3–4: register own notifier (dedup)
-  /\ SendEntryOk(f) /\ ~closed /\ Len(queue) + reservedV >= Cap
+SendFull(f) ==           \* §4 steps 3–4: register own notifier (dedup);
+                         \* rendezvous: "full" = no unmatched receiver demand
+  /\ SendEntryOk(f) /\ ~closed /\ Len(queue) + reservedV >= Bound
   /\ sendW' = sendW \union {Th(f)}
   /\ fst' = [fst EXCEPT ![f].pc = "send_preparked", ![f].kind = EntryKind(f)]
   /\ cur' = [cur EXCEPT ![Th(f)] = f]
-  /\ UNCHANGED << promoted, lq, queue, reservedV, closed, recvW >>
+  /\ UNCHANGED << promoted, lq, queue, reservedV, closed, recvW, rvDemand >>
   /\ UNCHANGED rcVars /\ UNCHANGED notifVars
   /\ UNCHANGED << started, tornDown >> /\ UNCHANGED cntVars
 
@@ -328,12 +379,13 @@ ParkSend(f) ==           \* §4 step 5: unlock -> park (the residual window)
   /\ UNCHANGED chanVars /\ UNCHANGED rcVars /\ UNCHANGED notifVars
   /\ UNCHANGED << started, tornDown >> /\ UNCHANGED cntVars
 
-SendReserve(f) ==        \* §4 step 7: slot reservation
-  /\ SendEntryOk(f) /\ ~closed /\ Len(queue) + reservedV < Cap
+SendReserve(f) ==        \* §4 step 7: slot reservation (rendezvous: admission
+                         \* against committed receiver demand)
+  /\ SendEntryOk(f) /\ ~closed /\ Len(queue) + reservedV < Bound
   /\ reservedV' = reservedV + 1
   /\ fst' = [fst EXCEPT ![f].pc = "send_building", ![f].kind = EntryKind(f)]
   /\ cur' = [cur EXCEPT ![Th(f)] = f]
-  /\ UNCHANGED << promoted, lq, queue, closed, recvW, sendW >>
+  /\ UNCHANGED << promoted, lq, queue, closed, recvW, sendW, rvDemand >>
   /\ UNCHANGED rcVars /\ UNCHANGED notifVars
   /\ UNCHANGED << started, tornDown >> /\ UNCHANGED cntVars
 
@@ -367,7 +419,7 @@ SendFailLocked(f) ==     \* failure path: reopen the slot, wake senders — and,
                     ![f].contPc = "send_fail_deinit"]
        /\ recvW' = IF alsoRecv THEN {} ELSE recvW
   /\ sendW' = {}
-  /\ UNCHANGED << promoted, lq, queue, closed >>
+  /\ UNCHANGED << promoted, lq, queue, closed, rvDemand >>
   /\ UNCHANGED rcVars /\ UNCHANGED notifVars /\ UNCHANGED schedVars
   /\ UNCHANGED cntVars
 
@@ -392,7 +444,7 @@ SendPush(f) ==           \* §4 steps 10–12: infallible push, snapshot receive
   /\ fst' = [fst EXCEPT ![f].pc = "send_ring", ![f].env = "none",
                         ![f].snap = recvW, ![f].contPc = "send_done"]
   /\ recvW' = {}
-  /\ UNCHANGED << promoted, lq, closed, sendW >>
+  /\ UNCHANGED << promoted, lq, closed, sendW, rvDemand >>
   /\ UNCHANGED rcVars /\ UNCHANGED notifVars /\ UNCHANGED schedVars
   /\ UNCHANGED << built, receivedCnt, destroyDeinit, failDeinit >>
 
@@ -414,31 +466,59 @@ RecvEntryOk(f) ==
      /\ promoted /\ started[Th(f)] /\ held[Th(f)] >= 1 /\ cur[Th(f)] = Idle
   \/ /\ fst[f].pc = "recv_wake" /\ cur[Th(f)] = Idle
 
-RecvPop(f) ==            \* steps 2–4: pop, snapshot senders (a slot opened)
+RecvPop(f) ==            \* steps 2–4: pop, snapshot senders (a slot opened).
+                         \* A held demand token is NOT released here — the
+                         \* wait's terminal exit (deinit) releases it, so the
+                         \* copy-out window stays counted.
   /\ RecvEntryOk(f) /\ queue # << >>
   /\ queue' = Tail(queue)
   /\ fst' = [fst EXCEPT ![f].pc = "recv_ring", ![f].env = Head(queue),
                         ![f].snap = sendW, ![f].contPc = "recv_copyout"]
   /\ sendW' = {}
   /\ cur' = [cur EXCEPT ![Th(f)] = f]
-  /\ UNCHANGED << promoted, lq, reservedV, closed, recvW >>
+  /\ UNCHANGED << promoted, lq, reservedV, closed, recvW, rvDemand >>
   /\ UNCHANGED rcVars /\ UNCHANGED notifVars
   /\ UNCHANGED << started, tornDown >> /\ UNCHANGED cntVars
 
-RecvEOF(f) ==            \* step 6: drained and closed -> (eof-object)
+RecvEOF(f) ==            \* step 6: drained and closed -> (eof-object); a
+                         \* terminal exit releases the demand token
   /\ RecvEntryOk(f) /\ queue = << >> /\ closed
   /\ EofPolicy = "asis" \/ reservedV = 0     \* repair: EOF outwaits reservations
-  /\ fst' = [fst EXCEPT ![f].pc = "ready", ![f].eof = TRUE]
-  /\ UNCHANGED chanVars /\ UNCHANGED rcVars /\ UNCHANGED notifVars
+  /\ rvDemand' = rvDemand - (IF fst[f].hasTok THEN 1 ELSE 0)
+  /\ fst' = [fst EXCEPT ![f].pc = "ready", ![f].eof = TRUE,
+                        ![f].hasTok = FALSE]
+  /\ UNCHANGED << promoted, lq, queue, reservedV, closed, recvW, sendW >>
+  /\ UNCHANGED rcVars /\ UNCHANGED notifVars
   /\ UNCHANGED schedVars /\ UNCHANGED cntVars
 
-RecvRegister(f) ==       \* step 7: register own notifier (dedup)
+RecvRegister(f) ==       \* step 7: register own notifier (dedup). Rendezvous
+                         \* (Cap = 0): the park decision is the commitment
+                         \* point — acquire the demand token exactly once per
+                         \* logical wait (idempotent across wake-and-repark,
+                         \* which models the runtime's yield_retry
+                         \* re-execution), and, under the normative RvRing =
+                         \* "ring", snapshot-and-ring send_waiters: new
+                         \* demand is a send-side event, exactly like a freed
+                         \* slot. The rejected "noring" variant (Finding 4)
+                         \* grows demand silently.
   /\ RecvEntryOk(f) /\ queue = << >>
   /\ ~closed \/ (EofPolicy # "asis" /\ reservedV > 0)
   /\ recvW' = recvW \union {Th(f)}
-  /\ fst' = [fst EXCEPT ![f].pc = "recv_preparked"]
+  /\ IF Cap = 0 /\ ~fst[f].hasTok
+       THEN /\ rvDemand' = rvDemand + 1
+            /\ IF RvRing = "ring"
+                 THEN /\ fst' = [fst EXCEPT ![f].pc = "recv_demand_ring",
+                                   ![f].hasTok = TRUE, ![f].snap = sendW,
+                                   ![f].contPc = "recv_preparked"]
+                      /\ sendW' = {}
+                 ELSE /\ fst' = [fst EXCEPT ![f].pc = "recv_preparked",
+                                   ![f].hasTok = TRUE]
+                      /\ sendW' = sendW
+       ELSE /\ rvDemand' = rvDemand
+            /\ fst' = [fst EXCEPT ![f].pc = "recv_preparked"]
+            /\ sendW' = sendW
   /\ cur' = [cur EXCEPT ![Th(f)] = f]
-  /\ UNCHANGED << promoted, lq, queue, reservedV, closed, sendW >>
+  /\ UNCHANGED << promoted, lq, queue, reservedV, closed >>
   /\ UNCHANGED rcVars /\ UNCHANGED notifVars
   /\ UNCHANGED << started, tornDown >> /\ UNCHANGED cntVars
 
@@ -466,7 +546,7 @@ RecvCopyFail(f) ==       \* amended §4: receive-side copy failure re-queues the
   /\ fst' = [fst EXCEPT ![f].pc = "recv_fail_ring", ![f].env = "none",
                         ![f].snap = recvW, ![f].contPc = "recv_fail_done"]
   /\ recvW' = {}
-  /\ UNCHANGED << promoted, lq, reservedV, closed, sendW >>
+  /\ UNCHANGED << promoted, lq, reservedV, closed, sendW, rvDemand >>
   /\ UNCHANGED rcVars /\ UNCHANGED notifVars /\ UNCHANGED schedVars
   /\ UNCHANGED cntVars
 
@@ -477,19 +557,29 @@ RecvFailDone(f) ==       \* the receive raises; the worker catches and retries.
                          \* documented weakened-deadlock hang, not a bug the
                          \* re-queue rule can or should repair.
   /\ fst[f].pc = "recv_fail_done"
-  /\ fst' = [fst EXCEPT ![f].pc = "ready", ![f].failLeft = @ - 1]
+  \* The raise is a terminal exit of this wait: the token releases; the
+  \* worker's retry re-acquires one. A handoff already committed against
+  \* the released token stays queued for whichever receiver comes next
+  \* (receivers are interchangeable; §6 rendezvous, abnormal-exit rule).
+  /\ rvDemand' = rvDemand - (IF fst[f].hasTok THEN 1 ELSE 0)
+  /\ fst' = [fst EXCEPT ![f].pc = "ready", ![f].failLeft = @ - 1,
+                        ![f].hasTok = FALSE]
   /\ cur' = [cur EXCEPT ![Th(f)] = Idle]
-  /\ UNCHANGED chanVars /\ UNCHANGED rcVars /\ UNCHANGED notifVars
+  /\ UNCHANGED << promoted, lq, queue, reservedV, closed, recvW, sendW >>
+  /\ UNCHANGED rcVars /\ UNCHANGED notifVars
   /\ UNCHANGED << started, tornDown >> /\ UNCHANGED cntVars
 
-RecvDeinit(f) ==         \* envelope.deinit(): the envelope's stub is released
+RecvDeinit(f) ==         \* envelope.deinit(): the envelope's stub is released;
+                         \* value in hand = terminal exit, token released
   /\ fst[f].pc = "recv_deinit"
   /\ rc' = rc - (IF fst[f].env = "self" THEN 1 ELSE 0)
   /\ receivedCnt' = receivedCnt + 1
+  /\ rvDemand' = rvDemand - (IF fst[f].hasTok THEN 1 ELSE 0)
   /\ fst' = [fst EXCEPT ![f].pc = "ready", ![f].env = "none",
-                        ![f].recvLeft = @ - 1]
+                        ![f].recvLeft = @ - 1, ![f].hasTok = FALSE]
   /\ cur' = [cur EXCEPT ![Th(f)] = Idle]
-  /\ UNCHANGED chanVars /\ UNCHANGED << held, destroyed >>
+  /\ UNCHANGED << promoted, lq, queue, reservedV, closed, recvW, sendW >>
+  /\ UNCHANGED << held, destroyed >>
   /\ UNCHANGED notifVars /\ UNCHANGED << started, tornDown >>
   /\ UNCHANGED << built, pushed, destroyDeinit, failDeinit >>
 
@@ -504,7 +594,7 @@ CloseLock(f) ==          \* steps 1–5: set closed, snapshot BOTH lists
                         ![f].contPc = "close_done", ![f].closeLeft = 0]
   /\ recvW' = {} /\ sendW' = {}
   /\ cur' = [cur EXCEPT ![Th(f)] = f]
-  /\ UNCHANGED << promoted, lq, queue, reservedV >>
+  /\ UNCHANGED << promoted, lq, queue, reservedV, rvDemand >>
   /\ UNCHANGED rcVars /\ UNCHANGED notifVars
   /\ UNCHANGED << started, tornDown >> /\ UNCHANGED cntVars
 
@@ -559,7 +649,7 @@ Teardown(t) ==
             /\ destroyDeinit' = destroyDeinit + Len(queue)
             /\ queue' = << >> /\ recvW' = {} /\ sendW' = {}
        ELSE /\ UNCHANGED << destroyed, destroyDeinit, queue, recvW, sendW >>
-  /\ UNCHANGED << promoted, lq, reservedV, closed >>
+  /\ UNCHANGED << promoted, lq, reservedV, closed, rvDemand >>
   /\ UNCHANGED notifVars /\ UNCHANGED << cur, started >> /\ UNCHANGED fst
   /\ UNCHANGED << built, pushed, receivedCnt, failDeinit >>
 
@@ -598,7 +688,7 @@ Spec == /\ Init /\ [][Next]_vars
 TypeOK ==
   /\ promoted \in BOOLEAN /\ closed \in BOOLEAN /\ destroyed \in BOOLEAN
   /\ lq \in Seq(Msg) /\ queue \in Seq(Msg)
-  /\ reservedV \in Nat /\ rc \in Nat
+  /\ reservedV \in Nat /\ rc \in Nat /\ rvDemand \in Nat
   /\ held \in [Threads -> Nat]
   /\ recvW \subseteq Threads /\ sendW \subseteq Threads
   /\ wakeP \in [Threads -> BOOLEAN] /\ fdR \in [Threads -> BOOLEAN]
@@ -611,6 +701,7 @@ TypeOK ==
        /\ fst[f].rt \in Threads \union {"none"}
        /\ fst[f].plainLeft \in Nat /\ fst[f].selfLeft \in Nat
        /\ fst[f].recvLeft \in Nat /\ fst[f].failLeft \in Nat
+       /\ fst[f].hasTok \in BOOLEAN
   /\ built \in Nat /\ pushed \in Nat /\ receivedCnt \in Nat
   /\ destroyDeinit \in Nat /\ failDeinit \in Nat
 
@@ -638,6 +729,14 @@ EnvelopeAccounting ==
 ReservedAccounting ==
   reservedV = Cardinality({f \in Fibers :
                  fst[f].pc \in {"send_building", "send_push", "send_fail_locked"}})
+
+(* Rendezvous token accounting (kaappi#1601): the demand counter is        *)
+(* exactly the number of fibers holding a token — acquire is idempotent    *)
+(* per logical wait, and every terminal exit (value, EOF, raise) releases. *)
+(* On a Cap > 0 channel no token is ever acquired.                         *)
+RvTokenAccounting ==
+  /\ rvDemand = Cardinality({f \in Fibers : fst[f].hasTok})
+  /\ Cap > 0 => rvDemand = 0
 
 (* Parked or mid-operation fibers sit on a rooted stub (§2: only locally   *)
 (* owned stubs may be used; the waiting fiber roots it).                   *)

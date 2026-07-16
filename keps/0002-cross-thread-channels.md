@@ -292,7 +292,13 @@ admitted send abandoned across close, and receivers stranded by the
 copy-failure path — are repaired in the current text (§5's unconditional
 sweep; §4 receive step 6's `reserved == 0` guard; §4 step 9's
 closed-channel ring), and the rejected variants are kept in the model as
-regression witnesses.
+regression witnesses. The 2026-07-16 rendezvous amendment (§6,
+[kaappi#1601](https://github.com/kaappi/kaappi/issues/1601)) extended the
+model (Scenario `rv`, `Cap = 0`, demand tokens) and added a fourth
+finding before any code existed: a demand-growing receiver registration
+that does not ring `send_waiters` strands parked senders forever
+(`rv_noring`); §4 receive step 7a's ring is the repair, and the no-ring
+variant is kept as its witness.
 
 ### 1. The shared-object protocol; `SharedChannel` and envelopes (new `src/shared_object.zig`, `src/shared_channel.zig`)
 
@@ -576,7 +582,10 @@ copy today) and buys three things:
 ```
  1. lock
  2.   if closed: unlock → raise "send on closed channel"
- 3.   if bounded and queue_len + reserved == capacity:
+ 3.   if queue_len + reserved >= bound, where bound = the capacity for a
+      bounded channel, rv_demand for a rendezvous channel (§6: capacity 0
+      admits exactly as many in-flight messages as there are committed
+      receivers), ∞ if unbounded:
  4.       register own ThreadNotifier in send_waiters (dedup: no-op if present)
  5.       unlock → park: status .waiting, waiting_on = the stub, yield_retry
  6.       (the retry re-enters at step 1; nothing has been copied yet)
@@ -647,6 +656,14 @@ in flight.)
       with the channel open, or closed with admitted sends still in
       flight: eof must not race a reservation, so the receiver parks
       and is rung by the late push (or by step 9's failure ring)
+ 7a.  rendezvous only (§6): if this wait holds no demand token yet,
+      rv_demand += 1 and record the token on the fiber (once per
+      logical wait — idempotent across the yield_retry re-execution,
+      which re-enters this whole sequence), and snapshot-and-clear
+      send_waiters — new demand is a send-side event, rung after
+      unlock exactly like a freed slot (model finding 4). Every
+      terminal exit of the wait — value, eof, timeout, error,
+      termination — releases the token: rv_demand -= 1.
  8. unlock → park (.waiting on the stub, yield_retry rewind —
     [primitives_fiber.zig:183])
 ```
@@ -806,7 +823,10 @@ fiber-only backpressure stays on the lock-free path.
 - **`(make-channel)` / `(make-channel capacity)`** — default unbounded
   (today's semantics); with a capacity, `channel-send` on a full channel
   parks the sender until a receive frees a slot (backpressure): §4 steps
-  3–6 on the shared path, `waiting_on` parking on the local path.
+  3–6 on the shared path, `waiting_on` parking on the local path. A
+  *capacity* of **0 is a rendezvous channel** — see "Rendezvous channels"
+  below (amended 2026-07-16,
+  [kaappi#1601](https://github.com/kaappi/kaappi/issues/1601)).
 - **Timeouts on both operations** —
   `(channel-receive ch [timeout [timeout-val]])` **and**
   `(channel-send ch v [timeout [timeout-val]])`, SRFI-18-style, exactly
@@ -867,6 +887,88 @@ fiber-only backpressure stays on the lock-free path.
   handle (§2). Without first-class close, every pool and server invents
   ad-hoc sentinels; §8's `pool-shutdown!` is the immediate consumer.
 
+#### Rendezvous channels (capacity 0) — amended 2026-07-16, [kaappi#1600](https://github.com/kaappi/kaappi/issues/1600)/[#1601](https://github.com/kaappi/kaappi/issues/1601)
+
+*Supersedes the v0.15.0 behavior, where capacity 0 was a documented
+degenerate case — "permanently full": every send parked or timed out,
+every receive parked forever, and every untimed pairing deadlocked.
+Fail-loud but useless — it expressed nothing
+`(channel-receive (make-channel) timeout val)` on an unbounded, never-sent
+channel doesn't — and a footgun for anyone reading `(make-channel 0)` as
+Go's unbuffered channel.*
+
+`(make-channel 0)` is a **synchronous channel**: `channel-send` completes
+only when the value has been handed to a *committed receiver*, and
+`channel-receive` completes only when a sender provides a value.
+Whichever side arrives first waits for the other. Go's `make(chan T)` and
+Guile fibers' default channels are the semantic reference points.
+
+- **Mechanism — demand-bounded admission, not direct pairing.** The §4
+  reservation protocol has no sender/receiver pairing concept, and none
+  is added. A rendezvous channel is the *dynamic-capacity generalization*
+  of the bounded case: the admission bound at §4 send step 3 is
+  `rv_demand` — the number of receivers currently committed to the
+  channel — instead of a static capacity. The value still transfers
+  through the queue; committed demand is what opens a slot. Everything
+  else — reservation, envelope build outside the lock, wake-all/retry,
+  the §5 sweep — is unchanged. Both representations carry the counter
+  (`types.Channel.rv_demand` locally; `SharedChannel.rv_demand` under its
+  mutex once promoted; `promoteChannel` copies it exactly like
+  `capacity`/`closed`, so tokens acquired at a pre-promotion local park
+  stay counted across migration).
+- **Demand tokens.** A receiver *commits* at its park decision (§4
+  receive step 7a): `rv_demand += 1`, exactly once per logical wait — a
+  `Fiber` field records which channel holds the token, making the
+  increment idempotent across `yield_retry` re-execution — and every
+  terminal exit (value, eof, timeout, error, termination) releases it. A
+  registration that grows the demand also snapshot-and-clears
+  `send_waiters` under the lock and rings after unlock: **new demand is a
+  send-side event**, exactly like a freed slot. Model finding 4
+  (`rv_noring`) is the witness: both senders park before any receiver
+  commits, the registrations grow demand silently, and every fiber hangs.
+- **A completed send had a committed receiver.** Admission at
+  `queue_len + reserved < rv_demand` means a send proceeds only against
+  outstanding demand; between commit (push) and collection (pop) the
+  handoff rides the queue. Receivers are interchangeable — any receiver
+  may collect any committed handoff (FIFO). If the receiver whose token
+  admitted a handoff exits abnormally (error, termination) before
+  collecting, the handoff stays queued for whichever receiver comes next;
+  the sender cannot tell, and nothing is lost (`rv_recvfail` checks
+  exactly this through the receive-side copy-failure path).
+- **Timeouts.** Both operations keep this section's
+  `[timeout [timeout-val]]` shape. Two rules keep the rendezvous
+  guarantee honest at the timeout boundary, both receiver-local decisions
+  under the existing lock discipline (no new lock-free window; timeouts
+  stay scoped out of the TLA+ model as before): *delivery wins* — a
+  receive whose deadline fires when a handoff has already committed
+  returns the value, not the timeout; the timeout applies to waiting,
+  never to an already-satisfiable operation (a timed-out send has sent
+  nothing, exactly as §4's park-before-copy already guarantees) — and
+  *reservation drain* — on the shared path, an abandoning receiver that
+  observes `reserved > 0` with an empty queue re-parks until the in-flight
+  send pushes or aborts (its registered notifier is rung by both paths),
+  then re-decides, so a receiver's timed exit can never strand a send
+  already past its point of no return with the sender reporting success.
+- **Close, deadlock detection, the eof-send rejection: unchanged.**
+  Parked and future senders observe `closed` at admission and raise;
+  parked receivers drain committed handoffs first (the queue check
+  precedes the closed check) and return `(eof-object)` once
+  `reserved == 0`, releasing their tokens. A rendezvous wait that
+  provably can never pair raises the local deadlock error (KP3000), or
+  parks under §5's weakened cross-thread heuristic with timeouts as the
+  escape hatch; the messages should name the missing party ("no
+  receiver" / "no sender") rather than "full"/"empty".
+- **Fairness.** No ordering guarantee among concurrently-waiting senders
+  or receivers (wake-all/retry decides, matching every existing wake
+  discipline); committed handoffs transfer FIFO.
+- **Model coverage.** Scenario `rv` (`Cap = 0`) in
+  `research/tla/shared_channel.tla`: `rv_flipall` and `rv_recvfail` pass
+  the six pre-registered properties plus `RvTokenAccounting` (`rv_demand`
+  is exactly the held-token count at every state) and
+  `NoAbandonedTask`/`Termination`; `rv_noring` is finding 4's regression
+  witness. Local-park token acquisition and its carry across promotion
+  are modeled (`LocalRecvParkB`, `Promote`).
+
 ### 7. GC and teardown interactions
 
 - **Marking:** a promoted stub has no heap-value fields to trace (its
@@ -874,8 +976,11 @@ fiber-only backpressure stays on the lock-free path.
   their GCs are never registered for collection and never collect (filled
   once under `deepCopy`'s `no_collect`, freed wholesale).
 - **`markFiberState` / write barriers:** `waiting_on` already traced
-  ([`fiber.zig:570`](https://github.com/kaappi/kaappi/blob/54706a0c/src/fiber.zig#L570));
-  no new Value fields are added to `Fiber`.
+  ([`fiber.zig:570`](https://github.com/kaappi/kaappi/blob/54706a0c/src/fiber.zig#L570)).
+  The rendezvous amendment (§6) adds one Value field to `Fiber` — the
+  demand-token channel — traced by `markFiberState`/`referencesYoung`
+  exactly like `waiting_on`, and released (token decrement + field clear)
+  on fiber death/termination, the `owned_mutexes` cleanup precedent.
 - **Waiter-list lifecycle (normative):** at most **one entry per
   `ThreadNotifier` per list** — registration dedups by pointer (a no-op if
   the thread is already registered, however many of its fibers wait) and
