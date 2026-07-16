@@ -278,7 +278,9 @@ FO-TREE vector tree) are byte-opaque to a bytevector side-heap and the
 two bytevector workloads give D nothing end-to-end (FO-DIGEST
 compute-dominated, IP-BAND reassembly-bound). D stays implemented
 behind `-Dchannel-instrument` as gate lever `d` — any KEP-0003 gate
-re-run (kaappi#1596) must measure both lever settings — with the
+re-run (per
+[KEP-0003's revisit protocol](../keps/0003-shared-flat-numeric-data.md#path-to-accepted-revisit-protocol))
+must measure both lever settings — with the
 revisit condition recorded in KEP-0002 UQ 1 (field evidence of a
 copy-dominated large-bytevector fan-out, or KEP-0003 UQ 3 if that gate
 opens). Full statement: KEP-0002 UQ 1 (D);
