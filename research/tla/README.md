@@ -118,7 +118,7 @@ step 4 migration; close at the end).
 | `core_cap4_waitres` | amended, both failure modes | safety | **pass** ✓ | 1,607,571 |
 | `core_cap1_recvfail` | amended, receive failures, capacity 1 | safety + liveness | **pass** ✓ | 5,260,378 |
 | `core_cap1_waitres` | amended, send failures, capacity 1 | safety + liveness | **pass** ✓ | 945,608 |
-| `rv_flipall`† | rendezvous, send failures | safety + liveness | **pass** ✓ | 773,549 |
+| `rv_flipall`† | rendezvous, send failures | safety + liveness | **pass** ✓ | 1,169,435 |
 | `rv_recvfail`† | rendezvous, receive failures | safety + liveness | **pass** ✓ | 2,614,735 |
 | `rv_noring`† | **demand growth without the sender ring** | safety + liveness | **fail** — Finding 4 | ~0.4k* |
 
