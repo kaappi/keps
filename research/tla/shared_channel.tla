@@ -456,12 +456,17 @@ BuildFail(f) ==          \* §4 step 9 failure: partial copy took its stubs alre
   /\ UNCHANGED notifVars /\ UNCHANGED schedVars
   /\ UNCHANGED << pushed, receivedCnt, destroyDeinit, failDeinit >>
 
-SendFailLocked(f) ==     \* failure path: reopen the slot, wake senders — and,
-                         \* under the full repair, receivers too when closed
-                         \* (they may be parked waiting out this reservation)
+SendFailLocked(f) ==     \* failure path: reopen the slot, wake senders — and
+                         \* receivers too when closed (they may be parked
+                         \* waiting out this reservation, the full Finding-3
+                         \* repair) or on a rendezvous channel (always: a
+                         \* timed-out receiver draining this reservation per
+                         \* §6 must be rung by the abort as well as the push
+                         \* — timeouts themselves stay out of the model, but
+                         \* the ring is unconditional protocol behavior)
   /\ fst[f].pc = "send_fail_locked"
   /\ reservedV' = reservedV - 1
-  /\ LET alsoRecv == EofPolicy = "wait_reserved" /\ closed IN
+  /\ LET alsoRecv == (EofPolicy = "wait_reserved" /\ closed) \/ Cap = 0 IN
        /\ fst' = [fst EXCEPT ![f].pc = "send_fail_ring",
                     ![f].snap = sendW \union (IF alsoRecv THEN recvW ELSE {}),
                     ![f].contPc = "send_fail_deinit"]

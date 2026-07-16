@@ -600,8 +600,12 @@ copy today) and buys three things:
  8. unlock
  9. build envelope (deepCopy the payload)
       on failure: lock; reserved -= 1; snapshot-and-clear send_waiters
-      (the slot reopened) — and recv_waiters too if closed: a receiver
-      may be parked waiting out this very reservation (receive step 6);
+      (the slot reopened) — and recv_waiters too if closed (a receiver
+      may be parked waiting out this very reservation, receive step 6)
+      or on a rendezvous channel (always: §6's reservation-drain rule
+      parks a timed-out receiver against this reservation, and it must
+      be rung by the abort as well as the push, or its wait would
+      outlive the timeout it was given);
       unlock; ring the snapshots; envelope.deinit() — which releases,
       via freeObject, every stub refcount the partial copy took (§1);
       raise. Nothing was enqueued: "send fails ⇒ nothing sent" holds,
