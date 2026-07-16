@@ -22,7 +22,7 @@ alongside DOIs where they exist.*
 |---|---------|-------|------|--------|
 | P1 | Racing element-access semantics | KEP-0003 UQ 2 | **resolved** (kaappi#1473) — the hybrid | highest — wrong answer is UB or a gutted fast path |
 | P2 | Concurrency-protocol verification | KEP-0002 §§2, 4–6 | before KEP-0002 Phase 1 | highest leverage — bugs found here never reach Zig |
-| P3 | Envelope cost & copy elision | KEP-0002 UQ 1 | with KEP-0002 Phase 1 | perf only; design is correct either way |
+| P3 | Envelope cost & copy elision | KEP-0002 UQ 1 | **resolved** (kaappi#1535/#1546 + gate) — C ships; B not adopted; D does not ship | perf only; design is correct either way |
 | P4 | Deadlock-heuristic precision | KEP-0002 UQ 2 | KEP-0002 Phase 3 | UX of hangs vs. errors |
 | P5 | Benchmark methodology & the KEP-0003 gate | KEP-0002 Phase 7 / KEP-0003 gate | **resolved** (kaappi#1474) — gate read Between; KEP-0003 stays gated | decides KEP-0003's fate |
 | P6 | Cycle collection for shared objects | KEP-0002 UQ 6 | parked until Phase 5 usage data | low — debug tooling only |
@@ -269,6 +269,21 @@ under gc-stress/leak) is unproven. (D) deferred to the KEP-0003 gate as
 pre-registered — implemented behind a flag and measured. Recorded in
 KEP-0002 UQ 1; no §1 amendment ((B) did not win). Evidence: kaappi#1535
 (A/B/C/D matrix), kaappi#1546 (gate harness + lever D).
+
+**Decided (2026-07-16), completing (D): does not ship.** The gate was
+called (kaappi#1474 — Between), and its dataset answers the question
+this section assigned to it: both machines read `cd` ≈ `none` across
+the gate cells, because the high-share payloads (flonum vectors, the
+FO-TREE vector tree) are byte-opaque to a bytevector side-heap and the
+two bytevector workloads give D nothing end-to-end (FO-DIGEST
+compute-dominated, IP-BAND reassembly-bound). D stays implemented
+behind `-Dchannel-instrument` as gate lever `d` — any KEP-0003 gate
+re-run (kaappi#1596) must measure both lever settings — with the
+revisit condition recorded in KEP-0002 UQ 1 (field evidence of a
+copy-dominated large-bytevector fan-out, or KEP-0003 UQ 3 if that gate
+opens). Full statement: KEP-0002 UQ 1 (D);
+[`benchmarks/README.md`](benchmarks/README.md) §8. With this, P3 is
+fully closed.
 
 ---
 
