@@ -12,13 +12,17 @@ The model found three protocol bugs in the original KEP text
 (Findings 1–3 below) and exposed one unspecified case (receive-side
 copy failure). **All four are repaired/specified in the amended KEP-0002
 text, and every repair was model-checked before it became spec text.**
-The rejected designs remain in the suite as regression witnesses: three
-configs fail *by design* and `run.sh` asserts those expectations.
+The 2026-07-16 rendezvous amendment (capacity 0,
+[kaappi#1601](https://github.com/kaappi/kaappi/issues/1601)) extended
+the model with demand-bounded admission and found a fourth protocol bug
+before any code existed (Finding 4 below). The rejected designs remain
+in the suite as regression witnesses: four configs fail *by design* and
+`run.sh` asserts those expectations.
 
 ## Running
 
 ```bash
-./run.sh                       # all nine configs, ~8 min total
+./run.sh                       # all twelve configs, ~15 min total
 ./run.sh core_cap4_selective   # a single config
 ```
 
@@ -43,6 +47,7 @@ runs two fibers (`f0a`, `f0b`); `t1`/`t2` run one fiber each (`f1`,
 | §4 receive | pop + `send_waiters` snapshot; copy-out (`rc`/`held` for self messages); envelope deinit; the amended copy-failure re-queue-at-head + `recv_waiters` ring; drain-then-EOF with the amended `reserved == 0` guard; register + park |
 | §5 notifier | `wake_pending` flag then fd, as two steps; the swap-loop / poll consume protocol as separate scheduler actions; the amended unconditional sweep (and the rejected readiness-filtered sweep) |
 | §6 close | idempotence-guarded set + both-lists snapshot-and-clear + ring |
+| §6 rendezvous (Cap = 0) | demand-bounded admission (`Bound = rvDemand`); per-fiber demand tokens acquired idempotently at the park decision (local and shared) and released on every terminal exit; the demand-growth `send_waiters` ring as its own lock-then-ring window; token carry across promotion |
 | §7 lifecycle | waiter-list dedup (sets keyed by thread); teardown releasing all of a heap's stubs |
 | cooperative scheduling | `cur[t]`: fibers of one thread serialize; primitives have no fiber switch points; the scheduler (sweep/poll) runs only when no fiber is mid-primitive |
 
@@ -54,16 +59,24 @@ build, each flag-then-fd ring, the `wake_pending` swap, the poll, each
 refcount transition.
 
 **Protocol variants (CONSTANTS).** The amended KEP-0002 text corresponds
-to `SweepPolicy = "flip_all"` and `EofPolicy = "wait_reserved"` (plus
-the `RecvFail` re-queue rule). The rejected designs are kept selectable:
+to `SweepPolicy = "flip_all"`, `EofPolicy = "wait_reserved"`, and
+`RvRing = "ring"` (plus the `RecvFail` re-queue rule). The rejected
+designs are kept selectable:
 `"selective"` (the original §5 readiness-filtered sweep — Finding 1),
-`"asis"` (the original EOF-when-closed rule — Finding 2), and
-`"wait_reserved_naive"` (the incomplete Finding-2 repair — Finding 3).
+`"asis"` (the original EOF-when-closed rule — Finding 2),
+`"wait_reserved_naive"` (the incomplete Finding-2 repair — Finding 3),
+and `RvRing = "noring"` (demand growth without the `send_waiters` ring —
+Finding 4).
 
 **Scoped out** (would not change the checked properties at these
 bounds): notifier refcounts and the `alive` flag (no thread exits
-mid-model — §7's teardown pruning is untested here); §6 timeouts;
-local-channel capacity pre-promotion; the §5 deadlock heuristic (that
+mid-model — §7's teardown pruning is untested here); §6 timeouts —
+including the rendezvous delivery-wins and reservation-drain rules,
+which are receiver-local decisions under the already-modeled lock
+discipline and add no new lock-free window;
+local-channel capacity pre-promotion (the rv scenario *does* model the
+local rendezvous park and its token-carrying migration); the §5
+deadlock heuristic (that
 is P4); equality (UQ 4). Promotion's *internal* re-entrancy (early
 publication, §2 step 2) is modeled by its specified outcome, not
 rediscovered. Weak-memory effects are not modeled (TLA+ steps are
@@ -81,12 +94,16 @@ action structure, and GenMC remains P2's escalation path.
 | 5. drain-then-EOF | structural in `RecvEOF` (queue-empty and `reserved == 0` guards precede EOF) — TLC exercises close-vs-push interleavings against it |
 | 6. no lost wakeup (liveness) | `Termination` (`<>[](AllDone ∧ AllTorn)`) under weak fairness, plus TLC deadlock checking — a stranded parked fiber is a deadlock because scripts always close the stream |
 
-Two scenario scripts: **core** (promotion drain + migration, optional
+Three scenario scripts: **core** (promotion drain + migration, optional
 pre-promotion local self-send so both the drain-alias and empty-queue
 migration paths are reachable, competing receivers on two threads, a
-remote self-send, both failure modes, close at the end) and **strand**
+remote self-send, both failure modes, close at the end), **strand**
 (the §8 pool-shutdown shape: one sender racing an independent closer,
-two receive-until-EOF workers).
+two receive-until-EOF workers), and **rv** (rendezvous, `Cap = 0`: two
+senders on two threads against two single-receive receivers — budgets
+matched so `NoAbandonedTask` must hold — with f0b's receive able to
+park locally *before* promotion, exercising the token-carrying §2
+step 4 migration; close at the end).
 
 ## Results (TLC 2.19, macOS aarch64, 2026-07-12)
 
@@ -101,9 +118,20 @@ two receive-until-EOF workers).
 | `core_cap4_waitres` | amended, both failure modes | safety | **pass** ✓ | 1,607,571 |
 | `core_cap1_recvfail` | amended, receive failures, capacity 1 | safety + liveness | **pass** ✓ | 5,260,378 |
 | `core_cap1_waitres` | amended, send failures, capacity 1 | safety + liveness | **pass** ✓ | 945,608 |
+| `rv_flipall`† | rendezvous, send failures | safety + liveness | **pass** ✓ | 773,549 |
+| `rv_recvfail`† | rendezvous, receive failures | safety + liveness | **pass** ✓ | 2,614,735 |
+| `rv_noring`† | **demand growth without the sender ring** | safety + liveness | **fail** — Finding 4 | ~0.4k* |
 
 \* states explored before the violation stopped the search; varies
 across runs (parallel BFS).
+
+† added by the 2026-07-16 rendezvous amendment
+([kaappi#1601](https://github.com/kaappi/kaappi/issues/1601)); run with
+TLC 2.19. The nine original configs were re-run at the same time and
+reproduce the recorded outcomes — the pass configs' distinct-state
+counts are unchanged by the extension (for `Cap > 0` the added
+variables are constant), which is itself a check that the rendezvous
+changes are conservative.
 
 All passing configs satisfy every safety invariant, TLC's deadlock
 check, and (where marked) the `Termination` liveness property.
@@ -199,6 +227,33 @@ Two consequences the model surfaced, now stated in the KEP:
   consume receive budgets and rediscovered this as a spurious
   "deadlock" — the fix was the model's workload, not the protocol.)
 
+## Finding 4 — rendezvous demand that grows silently strands parked senders
+
+**Violated:** property 6 (no lost wakeup), on a rendezvous channel.
+**Witness:** `rv_noring` (deadlock, found in under a thousand states).
+**Repaired in §4 receive step 7a:** a receiver registration that grows
+`rvDemand` also snapshot-and-clears `send_waiters` under the lock and
+rings after unlock — new demand is a send-side event, exactly like a
+freed slot.
+
+On a `Cap ≥ 1` channel the only events that can unblock a parked sender
+are a pop and a close, and both already ring `send_waiters`. Capacity 0
+adds a third: the admission bound itself *grows* when a receiver
+commits. A demand increment that only registers the receiver's own
+notifier (the natural transliteration of the existing park path) wakes
+nobody: both senders can attempt their sends before any receiver
+commits — the bound is 0, so both park — and the receivers' subsequent
+registrations grow the bound silently. Every fiber is then parked with
+all four wakeup sources (pop, close, push-ring, demand-ring) either
+unreachable or missing, and TLC reports the all-parked deadlock
+immediately.
+
+The repair reuses the existing snapshot-under-lock / ring-after-unlock
+discipline verbatim (`recv_demand_ring` in the model is the same
+two-step flag-then-fd ring every other wake uses), and the retry race
+it opens — a woken sender re-checks admission through `send()` under
+the lock — is the same wake-all/retry pattern §4 already commits to.
+
 ---
 
 ## Amendment record
@@ -215,6 +270,11 @@ model-checked first):
 4. **§4 receive step 5** — receive-side copy failure re-queues at the
    head and rings `recv_waiters`; capacity may transiently overshoot
    (previously unspecified).
+5. **§4 send step 3 / receive step 7a, §6 "Rendezvous channels"**
+   (2026-07-16, [kaappi#1601](https://github.com/kaappi/kaappi/issues/1601))
+   — capacity 0 becomes demand-bounded rendezvous; the demand-growth
+   `send_waiters` ring (Finding 4) is normative; demand tokens acquire
+   idempotently per logical wait and release on every terminal exit.
 
 KEP-0002's Phase 1 now carries this suite as a merge gate, and Phases
 3–4 list the findings' interleavings as required regression tests.
