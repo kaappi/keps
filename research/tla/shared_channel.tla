@@ -55,18 +55,35 @@ CONSTANTS
   RecvFail,     \* TRUE: the receive-side copy-out can fail; the amended §4
                 \* re-queues the envelope at the head and rings recv_waiters
                 \* ("receive fails => nothing received")
-  RvRing        \* "ring"   (normative: a registration that grows rvDemand
+  RvRing,       \* "ring"   (normative: a registration that grows rvDemand
                 \*     snapshot-and-rings send_waiters)
                 \* | "noring" (REJECTED, Finding 4: demand grows silently —
                 \*     parked senders are never woken)
+  RvPopWithdraw,\* "at_pop"    (normative, Finding 5 repair: a pop by a
+                \*     token-holding receiver withdraws its demand in the
+                \*     same mutex section as the pop)
+                \* | "at_deinit" (REJECTED, Finding 5: the token stays
+                \*     counted through the unlocked copy-out, admitting a
+                \*     second send against an already-satisfied receiver)
+  RvAbandon     \* "none" | "atomic" | "naive" — receiver abandonment (the
+                \* §6 timeout withdraw, modeled as a spontaneous decision
+                \* since timers are scoped out). "atomic" (normative,
+                \* Finding 6 repair): queue-check, reservation-check, and
+                \* withdrawal are one mutex section — enabled only when
+                \* queue = <<>> ∧ reserved = 0, which structurally encodes
+                \* both delivery-wins and the reservation-drain rule.
+                \* "naive" (REJECTED, Finding 6): withdraws without the
+                \* reservation check, stranding an admitted send.
 
 ASSUME Cap \in Nat
 ASSUME SweepPolicy \in {"selective", "flip_all"}
 ASSUME FailCopy \in BOOLEAN
-ASSUME Scenario \in {"core", "strand", "rv"}
+ASSUME Scenario \in {"core", "strand", "rv", "rv2", "rva"}
 ASSUME EofPolicy \in {"asis", "wait_reserved_naive", "wait_reserved"}
 ASSUME RecvFail \in BOOLEAN
 ASSUME RvRing \in {"ring", "noring"}
+ASSUME RvPopWithdraw \in {"at_pop", "at_deinit"}
+ASSUME RvAbandon \in {"none", "atomic", "naive"}
 
 Threads == {"t0", "t1", "t2"}
 Fibers  == {"f0a", "f0b", "f1", "f2"}
@@ -87,19 +104,49 @@ Idle    == "idle"
 (*         close; f1: 1 self send; f0b, f2: 1 receive each (f0b may park   *)
 (*         locally pre-promotion, exercising token-carrying migration).    *)
 (*         Sends = receive budgets, so NoAbandonedTask must hold.          *)
+(* rv2:    Finding 5 geometry — f1: 2 self sends against f0b's single      *)
+(*         receive, no other receiver (f2 idle; f0a only promotes and      *)
+(*         closes). Under "at_deinit" the pop window admits f1's second    *)
+(*         send against f0b's already-satisfied token and no receiver      *)
+(*         remains: the handoff is destroyed at teardown (NoAbandonedTask  *)
+(*         fails). Under "at_pop" the second send parks and close raises   *)
+(*         it out.                                                         *)
+(* rva:    Finding 6 geometry — f1: 1 self send against f0b's single       *)
+(*         receive, and f0b may ABANDON its wait once (the modeled §6      *)
+(*         timeout withdraw); f2 idle; f0a promotes and closes. Under      *)
+(*         "naive" the withdraw can interleave with f1's in-flight         *)
+(*         reservation: f1 pushes into withdrawn demand, nobody is left,   *)
+(*         NoAbandonedTask fails. Under "atomic" the abandon is disabled   *)
+(*         while reserved > 0 (drain) or the queue is non-empty            *)
+(*         (delivery-wins), so nothing strands.                            *)
+(* rv2/rva use PLAIN sends deliberately: a stranded SELF envelope would    *)
+(* hold a stub of the channel, pinning rc above zero — the strand would    *)
+(* then surface as the documented §1 cycle leak instead of a              *)
+(* destroy-at-zero deinit, and NoAbandonedTask (destroyDeinit = 0) would   *)
+(* hold vacuously. Plain envelopes keep the property able to see the      *)
+(* abandoned handoff.                                                      *)
 PreloadSelf   == Scenario = "core"
 PlainSends(f) == CASE Scenario = "core"   -> (IF f = "f0a" THEN 1 ELSE 0)
                    [] Scenario = "strand" -> (IF f = "f1"  THEN 1 ELSE 0)
                    [] Scenario = "rv"     -> (IF f = "f0a" THEN 1 ELSE 0)
+                   [] Scenario = "rv2"    -> (IF f = "f1"  THEN 2 ELSE 0)
+                   [] Scenario = "rva"    -> (IF f = "f1"  THEN 1 ELSE 0)
 SelfSends(f)  == CASE Scenario = "core"   -> (IF f = "f1"  THEN 1 ELSE 0)
                    [] Scenario = "strand" -> 0
                    [] Scenario = "rv"     -> (IF f = "f1"  THEN 1 ELSE 0)
+                   [] Scenario \in {"rv2", "rva"} -> 0
 RecvBudget(f) == CASE Scenario = "core"   -> (CASE f = "f0b" -> 1 [] f = "f2" -> 2
                                                 [] OTHER -> 0)
                    [] Scenario = "strand" -> (IF f \in {"f0b", "f2"} THEN 2 ELSE 0)
                    [] Scenario = "rv"     -> (IF f \in {"f0b", "f2"} THEN 1 ELSE 0)
+                   [] Scenario \in {"rv2", "rva"} -> (IF f = "f0b" THEN 1 ELSE 0)
 UntilEOF(f)   == Scenario = "strand" /\ f \in {"f0b", "f2"}
 Closer(f)     == f = "f0a"
+(* One bounded abandonment, rva's f0b only: enough to reach the Finding-6  *)
+(* interleavings without letting weak fairness "escape" every wait through *)
+(* abandonment (which would hollow out the lost-wakeup meaning of          *)
+(* Termination for the other fibers).                                      *)
+AbandonBudget(f) == IF Scenario = "rva" /\ f = "f0b" THEN 1 ELSE 0
 
 VARIABLES
   \* channel, local representation (pre-promotion, t0 only)
@@ -171,7 +218,8 @@ Init ==
           failLeft |-> IF RecvBudget(f) > 0 THEN 1 ELSE 0,
           preloadLeft |-> IF f = "f0a" THEN p ELSE 0,
           closeLeft |-> IF Closer(f) THEN 1 ELSE 0,
-          eof |-> FALSE, hasTok |-> FALSE]]
+          eof |-> FALSE, hasTok |-> FALSE,
+          abandonLeft |-> AbandonBudget(f)]]
   /\ built = 0 /\ pushed = 0 /\ receivedCnt = 0
   /\ destroyDeinit = 0 /\ failDeinit = 0
 
@@ -408,12 +456,17 @@ BuildFail(f) ==          \* §4 step 9 failure: partial copy took its stubs alre
   /\ UNCHANGED notifVars /\ UNCHANGED schedVars
   /\ UNCHANGED << pushed, receivedCnt, destroyDeinit, failDeinit >>
 
-SendFailLocked(f) ==     \* failure path: reopen the slot, wake senders — and,
-                         \* under the full repair, receivers too when closed
-                         \* (they may be parked waiting out this reservation)
+SendFailLocked(f) ==     \* failure path: reopen the slot, wake senders — and
+                         \* receivers too when closed (they may be parked
+                         \* waiting out this reservation, the full Finding-3
+                         \* repair) or on a rendezvous channel (always: a
+                         \* timed-out receiver draining this reservation per
+                         \* §6 must be rung by the abort as well as the push
+                         \* — timeouts themselves stay out of the model, but
+                         \* the ring is unconditional protocol behavior)
   /\ fst[f].pc = "send_fail_locked"
   /\ reservedV' = reservedV - 1
-  /\ LET alsoRecv == EofPolicy = "wait_reserved" /\ closed IN
+  /\ LET alsoRecv == (EofPolicy = "wait_reserved" /\ closed) \/ Cap = 0 IN
        /\ fst' = [fst EXCEPT ![f].pc = "send_fail_ring",
                     ![f].snap = sendW \union (IF alsoRecv THEN recvW ELSE {}),
                     ![f].contPc = "send_fail_deinit"]
@@ -467,16 +520,28 @@ RecvEntryOk(f) ==
   \/ /\ fst[f].pc = "recv_wake" /\ cur[Th(f)] = Idle
 
 RecvPop(f) ==            \* steps 2–4: pop, snapshot senders (a slot opened).
-                         \* A held demand token is NOT released here — the
-                         \* wait's terminal exit (deinit) releases it, so the
-                         \* copy-out window stays counted.
+                         \* Normative ("at_pop", Finding 5 repair): a pop by
+                         \* a token-holding receiver withdraws its demand in
+                         \* this same mutex section — the receiver is
+                         \* satisfied the instant it owns an envelope, so its
+                         \* token must stop admitting sends before the ring
+                         \* below can wake one. The rejected "at_deinit"
+                         \* keeps the token counted through the unlocked
+                         \* copy-out (rv2_popwindow is its witness). On the
+                         \* copy-failure path the token stays withdrawn
+                         \* either way: the raise is a terminal exit, and the
+                         \* re-queued envelope falls under §6's abnormal-exit
+                         \* rule (collectable by whichever receiver comes).
   /\ RecvEntryOk(f) /\ queue # << >>
+  /\ LET withdraw == RvPopWithdraw = "at_pop" /\ fst[f].hasTok IN
+       /\ rvDemand' = rvDemand - (IF withdraw THEN 1 ELSE 0)
+       /\ fst' = [fst EXCEPT ![f].pc = "recv_ring", ![f].env = Head(queue),
+                             ![f].snap = sendW, ![f].contPc = "recv_copyout",
+                             ![f].hasTok = IF withdraw THEN FALSE ELSE fst[f].hasTok]
   /\ queue' = Tail(queue)
-  /\ fst' = [fst EXCEPT ![f].pc = "recv_ring", ![f].env = Head(queue),
-                        ![f].snap = sendW, ![f].contPc = "recv_copyout"]
   /\ sendW' = {}
   /\ cur' = [cur EXCEPT ![Th(f)] = f]
-  /\ UNCHANGED << promoted, lq, reservedV, closed, recvW, rvDemand >>
+  /\ UNCHANGED << promoted, lq, reservedV, closed, recvW >>
   /\ UNCHANGED rcVars /\ UNCHANGED notifVars
   /\ UNCHANGED << started, tornDown >> /\ UNCHANGED cntVars
 
@@ -584,6 +649,37 @@ RecvDeinit(f) ==         \* envelope.deinit(): the envelope's stub is released;
   /\ UNCHANGED << built, pushed, destroyDeinit, failDeinit >>
 
 -----------------------------------------------------------------------------
+(* §6 receiver abandonment — the timeout withdraw, modeled as a bounded    *)
+(* spontaneous decision (timers are scoped out; the timer pop that         *)
+(* triggers it in the runtime is irrelevant to the protocol content).      *)
+(* The enabling condition IS the amended protocol: the withdraw happens    *)
+(* only with the queue empty (a committed handoff outranks the timer —     *)
+(* delivery-wins; with a value present the fiber's RecvPop is the enabled  *)
+(* action instead) and, under the normative "atomic" variant, with no      *)
+(* reservation in flight (the drain rule: an admitted send must land or    *)
+(* abort first — its push re-enables RecvPop, its abort re-enables this).  *)
+(* All three checks and the decrement are one mutex section, which is      *)
+(* exactly what Finding 6 requires: the rejected "naive" variant skips     *)
+(* the reservation check, letting a sender reserve against the token       *)
+(* after the receiver's empty-queue observation and push into demand       *)
+(* that no longer exists. The abandoning fiber's recv_waiters              *)
+(* registration goes stale — a later ring is one harmless spurious sweep   *)
+(* (§7), faithful to the runtime.                                          *)
+
+Abandon(f) ==
+  /\ RvAbandon # "none" /\ fst[f].abandonLeft > 0
+  /\ fst[f].pc = "recv_parked" /\ fst[f].hasTok
+  /\ cur[Th(f)] = Idle
+  /\ queue = << >>
+  /\ RvAbandon = "naive" \/ reservedV = 0
+  /\ rvDemand' = rvDemand - 1
+  /\ fst' = [fst EXCEPT ![f].pc = "ready", ![f].hasTok = FALSE,
+               ![f].recvLeft = @ - 1, ![f].abandonLeft = @ - 1]
+  /\ UNCHANGED << promoted, lq, queue, reservedV, closed, recvW, sendW >>
+  /\ UNCHANGED rcVars /\ UNCHANGED notifVars
+  /\ UNCHANGED schedVars /\ UNCHANGED cntVars
+
+-----------------------------------------------------------------------------
 (* §6 close.                                                               *)
 
 CloseLock(f) ==          \* steps 1–5: set closed, snapshot BOTH lists
@@ -665,6 +761,7 @@ FiberNext(f) ==
   \/ SendPush(f) \/ SendDone(f)
   \/ RecvPop(f) \/ RecvEOF(f) \/ RecvRegister(f) \/ ParkRecv(f)
   \/ RecvCopyOut(f) \/ RecvCopyFail(f) \/ RecvFailDone(f) \/ RecvDeinit(f)
+  \/ Abandon(f)
   \/ CloseLock(f) \/ CloseDone(f)
   \/ RingFlag(f) \/ RingFd(f) \/ RingDone(f)
 
@@ -701,7 +798,7 @@ TypeOK ==
        /\ fst[f].rt \in Threads \union {"none"}
        /\ fst[f].plainLeft \in Nat /\ fst[f].selfLeft \in Nat
        /\ fst[f].recvLeft \in Nat /\ fst[f].failLeft \in Nat
-       /\ fst[f].hasTok \in BOOLEAN
+       /\ fst[f].hasTok \in BOOLEAN /\ fst[f].abandonLeft \in Nat
   /\ built \in Nat /\ pushed \in Nat /\ receivedCnt \in Nat
   /\ destroyDeinit \in Nat /\ failDeinit \in Nat
 

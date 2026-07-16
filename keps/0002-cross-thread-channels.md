@@ -298,7 +298,14 @@ model (Scenario `rv`, `Cap = 0`, demand tokens) and added a fourth
 finding before any code existed: a demand-growing receiver registration
 that does not ring `send_waiters` strands parked senders forever
 (`rv_noring`); §4 receive step 7a's ring is the repair, and the no-ring
-variant is kept as its witness.
+variant is kept as its witness. Implementation review
+([kaappi#1604](https://github.com/kaappi/kaappi/pull/1604)) surfaced two
+further demand-accounting races the matched-budget rv script could not
+express — a token counted through the pop's copy-out window (finding 5,
+`rv2_popwindow`) and a timeout withdraw racing an in-flight reservation
+(finding 6, `rva_naive`) — both repaired here (withdraw-at-pop, §4
+receive step 3; the single-mutex-section timeout withdraw, §6) and
+model-checked before the code fix.
 
 ### 1. The shared-object protocol; `SharedChannel` and envelopes (new `src/shared_object.zig`, `src/shared_channel.zig`)
 
@@ -593,8 +600,12 @@ copy today) and buys three things:
  8. unlock
  9. build envelope (deepCopy the payload)
       on failure: lock; reserved -= 1; snapshot-and-clear send_waiters
-      (the slot reopened) — and recv_waiters too if closed: a receiver
-      may be parked waiting out this very reservation (receive step 6);
+      (the slot reopened) — and recv_waiters too if closed (a receiver
+      may be parked waiting out this very reservation, receive step 6)
+      or on a rendezvous channel (always: §6's reservation-drain rule
+      parks a timed-out receiver against this reservation, and it must
+      be rung by the abort as well as the push, or its wait would
+      outlive the timeout it was given);
       unlock; ring the snapshots; envelope.deinit() — which releases,
       via freeObject, every stub refcount the partial copy took (§1);
       raise. Nothing was enqueued: "send fails ⇒ nothing sent" holds,
@@ -634,7 +645,13 @@ in flight.)
 ```
  1. lock
  2.   if queue non-empty:
- 3.       pop envelope; snapshot-and-clear send_waiters (a slot opened)
+ 3.       pop envelope; if this receiver holds a rendezvous demand token
+          (§6), rv_demand -= 1 — the receiver is satisfied the moment it
+          owns an envelope, so its token must stop admitting sends
+          before the ring below can wake one (model finding 5: withdrawn
+          only later, at envelope deinit, the token spans the unlocked
+          copy-out and admits a second send against an already-satisfied
+          receiver); snapshot-and-clear send_waiters (a slot opened)
  4.       unlock; ring the snapshot; deepCopy out into own heap;
  5.       envelope.deinit(); return the value
           on copy failure: lock; push the envelope back at the queue
@@ -919,9 +936,16 @@ Guile fibers' default channels are the semantic reference points.
 - **Demand tokens.** A receiver *commits* at its park decision (§4
   receive step 7a): `rv_demand += 1`, exactly once per logical wait — a
   `Fiber` field records which channel holds the token, making the
-  increment idempotent across `yield_retry` re-execution — and every
-  terminal exit (value, eof, timeout, error, termination) releases it. A
-  registration that grows the demand also snapshot-and-clears
+  increment idempotent across `yield_retry` re-execution. The token is
+  withdrawn **at collection, atomically with the pop** (§4 receive step
+  3: the receiver is satisfied the moment it owns an envelope; model
+  finding 5, `rv2_popwindow`, shows a token that instead survives to
+  envelope deinit spanning the unlocked copy-out and admitting a second
+  send against an already-satisfied receiver), and on every other
+  terminal exit (eof, timeout, error, termination). On the receive-side
+  copy-failure path the token stays withdrawn: the raise is a terminal
+  exit, and the re-queued envelope falls under the abnormal-exit rule
+  below. A registration that grows the demand also snapshot-and-clears
   `send_waiters` under the lock and rings after unlock: **new demand is a
   send-side event**, exactly like a freed slot. Model finding 4
   (`rv_noring`) is the witness: both senders park before any receiver
@@ -937,9 +961,7 @@ Guile fibers' default channels are the semantic reference points.
   exactly this through the receive-side copy-failure path).
 - **Timeouts.** Both operations keep this section's
   `[timeout [timeout-val]]` shape. Two rules keep the rendezvous
-  guarantee honest at the timeout boundary, both receiver-local decisions
-  under the existing lock discipline (no new lock-free window; timeouts
-  stay scoped out of the TLA+ model as before): *delivery wins* — a
+  guarantee honest at the timeout boundary: *delivery wins* — a
   receive whose deadline fires when a handoff has already committed
   returns the value, not the timeout; the timeout applies to waiting,
   never to an already-satisfiable operation (a timed-out send has sent
@@ -949,6 +971,18 @@ Guile fibers' default channels are the semantic reference points.
   send pushes or aborts (its registered notifier is rung by both paths),
   then re-decides, so a receiver's timed exit can never strand a send
   already past its point of no return with the sender reporting success.
+  **Normative (model finding 6, `rva_naive`): the withdraw is one mutex
+  section** — the queue check, the reservation check, and the
+  `rv_demand` decrement must not be separate lock acquisitions, or a
+  sender can reserve against the still-held token between the
+  receiver's empty observation and its withdrawal, then push into
+  demand that no longer exists and report success into nowhere. With
+  the single-section rule, delivery-wins and the drain are structural:
+  the withdraw is simply disabled while a value is queued or a
+  reservation is in flight. Timers themselves stay scoped out of the
+  TLA+ model; the model's bounded `Abandon` action carries exactly this
+  enabling condition, which is how the timeout rules' protocol content
+  is checked without modeling time.
 - **Close, deadlock detection, the eof-send rejection: unchanged.**
   Parked and future senders observe `closed` at admission and raise;
   parked receivers drain committed handoffs first (the queue check
@@ -961,13 +995,15 @@ Guile fibers' default channels are the semantic reference points.
 - **Fairness.** No ordering guarantee among concurrently-waiting senders
   or receivers (wake-all/retry decides, matching every existing wake
   discipline); committed handoffs transfer FIFO.
-- **Model coverage.** Scenario `rv` (`Cap = 0`) in
-  `research/tla/shared_channel.tla`: `rv_flipall` and `rv_recvfail` pass
-  the six pre-registered properties plus `RvTokenAccounting` (`rv_demand`
-  is exactly the held-token count at every state) and
-  `NoAbandonedTask`/`Termination`; `rv_noring` is finding 4's regression
-  witness. Local-park token acquisition and its carry across promotion
-  are modeled (`LocalRecvParkB`, `Promote`).
+- **Model coverage.** Scenarios `rv`, `rv2`, and `rva` (`Cap = 0`) in
+  `research/tla/shared_channel.tla`: the normative configs pass the six
+  pre-registered properties plus `RvTokenAccounting` (`rv_demand` is
+  exactly the held-token count at every state) and
+  `NoAbandonedTask`/`Termination`; `rv_noring`, `rv2_popwindow`, and
+  `rva_naive` are findings 4–6's regression witnesses. Local-park token
+  acquisition and its carry across promotion are modeled
+  (`LocalRecvParkB`, `Promote`); the timeout withdraw is modeled as a
+  bounded abandonment whose enabling condition is the normative rule.
 
 ### 7. GC and teardown interactions
 

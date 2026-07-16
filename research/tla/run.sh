@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Model-check KEP-0002's SharedChannel protocol (P2 in research/open-problems.md).
 #
-# Usage:  ./run.sh [config-name ...]     default: all twelve configs
+# Usage:  ./run.sh [config-name ...]     default: all sixteen configs
 #
-# Four configs are EXPECTED to fail (they demonstrate Findings 1-4, see
+# Six configs are EXPECTED to fail (they demonstrate Findings 1-6, see
 # README.md); the script asserts each config's expected outcome and exits
 # nonzero only on a deviation. Needs Java 17+; fetches tla2tools.jar on
 # first run (verified with TLC 2.19).
@@ -25,6 +25,10 @@ expected() {
     core_cap4_waitres_naive) echo fail ;;  # Finding 3: naive repair strands receivers
     rv_noring)               echo fail ;;  # Finding 4: demand growth without a
                                            # send_waiters ring loses the sender wakeup
+    rv2_popwindow)           echo fail ;;  # Finding 5: token counted through the
+                                           # pop's copy-out window admits a strandable send
+    rva_naive)               echo fail ;;  # Finding 6: timeout withdraw racing a
+                                           # reservation strands an admitted send
     *)                       echo pass ;;
   esac
 }
@@ -34,7 +38,8 @@ if [ ${#configs[@]} -eq 0 ]; then
   configs=(core_cap1_flipall core_cap4_flipall core_cap4_selective
            strand_flipall strand_waitres core_cap4_waitres_naive
            core_cap4_waitres core_cap1_recvfail core_cap1_waitres
-           rv_flipall rv_recvfail rv_noring)
+           rv_flipall rv_recvfail rv_noring
+           rv2_popwithdraw rv2_popwindow rva_atomic rva_naive)
 fi
 
 rc=0
