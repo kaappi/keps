@@ -247,3 +247,34 @@ gate decision in kaappi#1474 is a *reading*, not an argument.
 - The tail-latency and notifier-coalescing measurements of
   kaappi#1472 are outside this protocol (no classification hangs on
   them); they follow §4's discipline informally.
+
+## 8. Outcome (recorded after evaluation — not a protocol change)
+
+**2026-07-16 — the gate read outcome 4, Between, on both reference
+machines independently**
+([kaappi#1474](https://github.com/kaappi/kaappi/issues/1474)) — genuine
+agreement, not the §5 cross-machine fallback. Only `IP-MAP` cleared
+Rule 1's 25% CI-lower bound (26.0% [25.7, 26.3] at 64 MiB on macOS; at
+8 MiB and 64 MiB on Linux) where 2 of 3 `IP-*` are required; Rules 2
+and 3 failed on `IP-MAP`, `FO-TREE`, and `FO-SLICE`, all far above the
+10% upper bound at both lever settings. KEP-0003 stays gated with the
+§5 outcome-4 revisit trigger.
+
+Datasets: [kaappi#1549](https://github.com/kaappi/kaappi/pull/1549)
+(macOS aarch64, kaappi commit `b6d349c0`, K–J floor 20×10, `w = 8`,
+both levers, 920 launches, 0 failures) and
+[kaappi#1580](https://github.com/kaappi/kaappi/pull/1580) (Linux
+x86_64, dedicated 8-physical-core droplet, kaappi commit `807fd64a`,
+~1000 launches, 0 failures). One per-machine exclusion, mirroring the
+IP-MATMUL amendment's reasoning: Linux's 64 MiB `FO-DIGEST` cell was
+dropped for runtime (~74–82 s/iteration; documented in the dataset
+metadata) — compute-dominated, under 2% share at every collected size
+on both machines, classification-neutral. The filled §6 worksheet is
+`docs/dev/kep-0003-acceptance-gate-worksheet.md` in the kaappi repo.
+
+This section records a result; §§1–7 stay as frozen. One deviation
+from §5's outcome-4 action (gate issue stays open): the maintainer
+deliberately closed kaappi#1474 along with the epic kaappi#1465 and
+the gated kaappi#1475, recording the call in their closing comments;
+the revisit trigger survives in the worksheet, and firing it opens
+fresh issues rather than reopening those.

@@ -24,7 +24,7 @@ alongside DOIs where they exist.*
 | P2 | Concurrency-protocol verification | KEP-0002 §§2, 4–6 | before KEP-0002 Phase 1 | highest leverage — bugs found here never reach Zig |
 | P3 | Envelope cost & copy elision | KEP-0002 UQ 1 | with KEP-0002 Phase 1 | perf only; design is correct either way |
 | P4 | Deadlock-heuristic precision | KEP-0002 UQ 2 | KEP-0002 Phase 3 | UX of hangs vs. errors |
-| P5 | Benchmark methodology & the KEP-0003 gate | KEP-0002 Phase 7 / KEP-0003 gate | before Phase 7 runs | decides KEP-0003's fate |
+| P5 | Benchmark methodology & the KEP-0003 gate | KEP-0002 Phase 7 / KEP-0003 gate | **resolved** (kaappi#1474) — gate read Between; KEP-0003 stays gated | decides KEP-0003's fate |
 | P6 | Cycle collection for shared objects | KEP-0002 UQ 6 | parked until Phase 5 usage data | low — debug tooling only |
 | P7 | Darwin `SO_REUSEPORT` distribution | KEP-0002 §9 | first thing in Phase 6 | small, empirical |
 
@@ -406,6 +406,20 @@ Thresholds carried verbatim from this section's first cut; change
 control freezes them once Phase 7 data collection starts. KEP-0003's
 gate paragraphs now point at the protocol. Execution is
 kaappi#1472 → kaappi#1474.
+
+**Status (2026-07-16).** Evaluated: the gate read **outcome 4 —
+Between** on both reference machines independently (kaappi#1474,
+datasets kaappi#1549 macOS aarch64 / kaappi#1580 Linux x86_64). Only
+`IP-MAP` cleared Rule 1's 25 % CI-lower bound where 2 of 3 `IP-*` are
+required; `IP-MAP`/`FO-TREE`/`FO-SLICE` kept Rules 2/3 far above the
+10 % upper bound at both lever settings. KEP-0003 stays Draft (gated)
+with the outcome-4 revisit trigger — real `kaappi-examples` traces
+exhibiting an `IP-*`-shaped hot loop. Full record:
+[`benchmarks/README.md`](benchmarks/README.md) §8 and the KEP-0003
+gate note; the filled worksheet lives in the kaappi repo at
+`docs/dev/kep-0003-acceptance-gate-worksheet.md`. With this, P5 is
+closed end-to-end: protocol registered, campaign run, classification
+read out mechanically.
 
 ---
 
