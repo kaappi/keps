@@ -48,6 +48,7 @@ Withdrawn   Rejected / Superseded
 | [0003](keps/0003-shared-flat-numeric-data.md) | Shared Flat Numeric Data | Draft (gated — evaluated Between, 2026-07-16) | `kaappi` core, `(kaappi parallel)` |
 | [0004](keps/0004-discoverable-deviations.md) | Discoverable Deviations from R7RS-small | Accepted | `kaappi` core, `kaappi.github.io` |
 | [0005](keps/0005-diagnostic-contract.md) | The Diagnostic Contract | Accepted | `kaappi` core, `kaappi.github.io` |
+| [0006](keps/0006-macro-expansion-beyond-syntax-rules.md) | Macro Expansion Beyond syntax-rules | Draft | `kaappi` core |
 
 ## License
 
