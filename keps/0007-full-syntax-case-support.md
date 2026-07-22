@@ -87,13 +87,15 @@ Codeberg repository (see Sources):
   **SRFI 148 (eager syntax-rules)**, is confirmed by its own reference
   implementation to add no power beyond `syntax-rules` — convenience sugar,
   not a fix for the class of problem in KEP-0006's Motivation.
-- The committee's own discussion acknowledges two lighter alternatives —
-  **syntactic closures** and **explicit-renaming macros** (KEP-0006's
-  proposal) — as "older, simpler, and more in the spirit of Scheme," while
-  noting neither gives a fully correct answer to *deliberately breaking*
-  hygiene the way `syntax-case`'s `datum->syntax` can. KEP-0006 makes that
-  tradeoff deliberately for the sake of shipping something sooner, cheaper,
-  and lower-risk to Kaappi's core.
+- Two lighter alternatives predate `syntax-case` — **syntactic closures**
+  (Bawden & Rees, 1988) and **explicit-renaming macros** (Clinger, 1991;
+  KEP-0006's proposal) — and are commonly regarded as simpler and closer to
+  Scheme's minimalist spirit. The Macrological Fascicle itself demonstrates
+  that both can be accommodated by a syntax-case-based expander (Appendix A,
+  "Other macro systems"), but neither gives a fully correct answer to
+  *deliberately breaking* hygiene the way `syntax-case`'s `datum->syntax`
+  can. KEP-0006 makes that tradeoff deliberately for the sake of shipping
+  something sooner, cheaper, and lower-risk to Kaappi's core.
 
 The practical conclusion: `syntax-case` is a real, load-bearing future
 requirement for full R7RS-large conformance, not a rumor — but its concrete

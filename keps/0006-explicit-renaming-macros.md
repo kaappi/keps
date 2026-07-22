@@ -72,11 +72,14 @@ macro argument" style used throughout both libraries to avoid combinatorial
 code blowup). But five macros' worth of these idioms, in two SRFIs, is a
 strong signal: this is a recurring cost, not a one-off.
 
-SRFI 202's own reference implementation description says outright: "The
-reference implementation is a `syntax-case` macro matching on claw shape,
-using `match`... for destructuring" — i.e. the SRFI's own authors built it
-on exactly the two facilities (`syntax-case`, and a `match` that assumes
-`syntax-case`) that Kaappi does not have.
+SRFI 202's reference implementation is itself a `syntax-case` macro — its
+Implementation section opens `(define-syntax and-let* (lambda (stx)
+(syntax-case stx (values) ...)))` — that delegates destructuring to a
+`match` facility, in the SRFI's own words "an implementation for Guile built
+on top of the `(ice-9 match)` module … and an implementation for Racket,
+built on top of Racket's `racket/match` module." Either way, the SRFI's own
+authors built it on exactly the two facilities (`syntax-case`, and a `match`
+that assumes it) that Kaappi does not have.
 
 ### Why explicit-renaming specifically
 
@@ -86,12 +89,12 @@ hygiene rewrite — high cost, and the spec it would target is still moving
 (target 2028). Explicit-renaming macros solve the *same* immediate problem —
 "a macro transformer needs to be real code, not a template" — with a much
 smaller mechanism that, as the Reference-level design below shows, reuses
-rather than replaces most of Kaappi's existing hygiene machinery. The
-R7RS-large committee's own discussion (cited in KEP-0007) independently
-weighs explicit-renaming and syntactic closures as "older, simpler, and
-more in the spirit of Scheme" than `syntax-case`, while noting neither gives
-as clean an answer to *deliberately* breaking hygiene — a tradeoff this KEP
-makes deliberately, see Alternatives considered.
+rather than replaces most of Kaappi's existing hygiene machinery.
+Explicit-renaming and syntactic closures both predate `syntax-case` and are
+commonly regarded as simpler and closer to Scheme's minimalist spirit (see
+KEP-0007), while neither answers *deliberately* breaking hygiene as
+cleanly — a tradeoff this KEP makes deliberately, see Alternatives
+considered.
 
 ### Prior art
 
