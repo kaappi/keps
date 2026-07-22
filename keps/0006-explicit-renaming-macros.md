@@ -322,6 +322,44 @@ collector frees a closure a live macro still references — a use-after-free.
 That is a second, distinct GC hazard on top of the reentrant-execution
 rooting flagged in the prerequisite section above.
 
+### Scope: which transformer kinds
+
+SRFI 211 gives portable names to a whole family of procedural transformers
+(`er-`, `ir-`, `sc-`, `rsc-macro-transformer`, and more), but that is a
+namespace registry, not a shopping list — an implementation provides the
+subset it supports and advertises each via `cond-expand`. This KEP
+deliberately proposes **one** primitive and derives at most one convenience
+from it:
+
+- **`er-macro-transformer` — the primitive (this KEP).** Everything above
+  builds it as a wrapper over existing hygiene machinery.
+- **`ir-macro-transformer` (implicit renaming) — in scope as a cheap
+  follow-on, not a separate KEP.** It is `er` with the hygiene default
+  inverted: rename every identifier by default, and let the author mark the
+  few that should leak to the use site. CHICKEN implements it as a thin
+  library over `er`, and Kaappi can do the same — no new core mechanism, no
+  new entry in the blast radius above. Because it inherits every hard
+  decision from this KEP (reentrant execution, GC rooting, the
+  `check`/`--sandbox` policy) and has a strict build-order dependency on
+  `er`, it should ship as an ordinary PR against `kaappi` core — a Scheme
+  library plus a `cond-expand` feature (`ir-macro-transformer`) and tests,
+  referencing this KEP — added when a concrete macro wants the nicer
+  default, not speculatively. Only if implementing it turned out to need
+  core changes beyond what `er` provides would it warrant an *amendment* to
+  this KEP, still not a document of its own.
+- **`sc-` / `rsc-macro-transformer` (syntactic closures) — out of scope.**
+  These expose first-class *syntactic environments* and
+  `make-syntactic-closure`, a different abstraction than `rename`/`compare`,
+  for negligible expressiveness beyond `er`/`ir` and little real-world code
+  that depends on them today. Adding them would be parity for its own sake.
+  Revisit only on a concrete need (e.g. porting MIT/GNU Scheme macro code),
+  or let them fall out as thin veneers if full `syntax-case` (KEP-0007) is
+  ever built.
+
+The governing principle is *one hygiene substrate, derive the rest*: `er`
+here, `ir` as a library over it if wanted, and nothing that introduces a
+second, parallel mechanism to maintain.
+
 ## Drawbacks
 
 - **Two macro systems to maintain and document**: `syntax-rules` (fast,
