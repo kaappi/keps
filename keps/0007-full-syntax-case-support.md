@@ -12,7 +12,10 @@
 | **Requires** | — |
 | **Supersedes** | — |
 
-*Search results cited below are current as of query date 2026-07-21. Split
+*Search results cited below are current as of query date 2026-07-21; the
+R7RS-large adoption, fascicle-structure, phasing, and library-naming claims
+were re-verified against primary sources (the Macrological Fascicle editor's
+introduction and the WG2 FAQ) on 2026-07-22. Split
 out of an earlier combined draft with KEP-0006 (Explicit-Renaming Macros)
 because the two proposals have no build-order dependency on each other:
 this KEP is external-standard-tracking and deliberately not proposing
@@ -47,20 +50,39 @@ next time this comes up.
 Per the WG2 (Scheme Reports Working Group 2) FAQ and the `scheme/r7rs`
 Codeberg repository (see Sources):
 
-- The working group **voted to adopt `syntax-case`** in 2023, specifically
-  because `syntax-rules` cannot express macros whose behavior depends on
-  real computation over the input syntax — the same class of problem
-  KEP-0006's Motivation demonstrates concretely against Kaappi's own SRFI
-  ports.
-- `syntax-case` lives in R7RS-large's **"Macrological Fascicle"**, one part
-  of a three-volume "Foundations" document.
-- **Target completion is 2028.** Committee activity (meeting agendas and
-  minutes) is ongoing through at least June 2026, including *unresolved*
-  questions as basic as **how `syntax-case` should be named as a library**
-  — one contributor's position, quoted directly: "I don't see any reason
-  for `(scheme syntax-case)` to exist; instead `(rnrs syntax-case (6))`
-  would be the R7RS-large syntax-case library." That is not a settled
-  detail two years after the adoption vote.
+- The working group **adopted `syntax-case`** through the "Yellow Ballot"
+  on macros (held between October 2021 and February 2022), which brought
+  the R6RS Standard Libraries chapter on `syntax-case` into R7RS-large —
+  chosen specifically because `syntax-rules` cannot express macros whose
+  behavior depends on real computation over the input syntax, the same
+  class of problem KEP-0006's Motivation demonstrates concretely against
+  Kaappi's own SRFI ports.
+- `syntax-case` lives in R7RS-large's **"Macrological Fascicle"** — one
+  fascicle of the **Foundations** volume (Foundations is itself one of
+  R7RS-large's three volumes, with Batteries and Environments; six further
+  Foundations fascicles are planned to follow).
+- What R7RS-large adopted is a **refinement of R6RS's `syntax-case`, not a
+  verbatim copy.** The Macrological Fascicle keeps the R6RS core but adds
+  syntax parameters (SRFI 139), identifier properties (SRFI 213), a
+  *procedural* interface to syntax-object destructuring alongside the
+  `syntax-case` form, a `custom-ellipsis` facility, an `erroneous-syntax`
+  form, and **implicit** phasing in place of R6RS's explicit phasing. The
+  consequence for Kaappi: the R6RS core is the stable, already-adopted part,
+  while these additive refinements — and the library packaging — are what is
+  still in draft. That localizes the "moving target" risk (Drawbacks, below)
+  to the refinements and, above all, the phasing model (see Reference-level
+  design), not to the `syntax-case` core itself.
+- **Target completion is 2028** (the Foundations volume, timed to the 50th
+  anniversary of the original 1978 Scheme report). Committee activity
+  (meeting agendas and minutes) is ongoing through at least June 2026,
+  including *unresolved* questions as basic as **how `syntax-case` should be
+  named as a library** — one contributor's position, quoted directly: "I
+  don't see any reason for `(scheme syntax-case)` to exist; instead `(rnrs
+  syntax-case (6))` would be the R7RS-large syntax-case library." As of the
+  current draft the fascicle's bindings live under the deliberately
+  temporary library name `(r7rs-drafts macro-fascicle)`, "intended for
+  experiments only" — so the permanent name is genuinely still open, years
+  after the R6RS chapter was adopted.
 - The alternative the committee explicitly rejected for this purpose,
   **SRFI 148 (eager syntax-rules)**, is confirmed by its own reference
   implementation to add no power beyond `syntax-rules` — convenience sugar,
@@ -129,10 +151,13 @@ also depend on, if pursued):
   portable library"). That risks regressing the existing, fast,
   well-tested `syntax-rules` path (`tests/scheme/hygiene/`,
   `src/tests_macros.zig`) for the sake of the new one.
-- Possibly **phase separation** (R6RS-style `for-syntax`/expand-time vs.
-  run-time environments) if Kaappi wants to track the eventual R7RS-large
-  library-import story precisely — itself a multi-week design question on
-  top of everything above.
+- Possibly **phase separation** if Kaappi wants to track the eventual
+  R7RS-large library-import story precisely — but note the target model is
+  **implicit** phasing: the Macrological Fascicle specifies implicit phasing
+  *in place of* R6RS's explicit `for`-import phase declarations, a different
+  (and, for the implementer, arguably simpler) design point than R6RS-style
+  expand-time-vs-run-time import phasing. Either way, a multi-week design
+  question on top of everything above.
 
 ## Drawbacks
 
@@ -194,6 +219,8 @@ None proposed. Revisit this KEP when either:
 
 - [scheme/r7rs wiki — Codeberg](https://codeberg.org/scheme/r7rs/wiki)
 - [scheme/r7rs FAQ — Codeberg](https://codeberg.org/scheme/r7rs/wiki/FAQ)
+- [The Macrological Fascicle — r7rs.org](https://r7rs.org/large/fascicles/macro/1/)
+- [The Macrological Fascicle: Editor's introduction — r7rs.org](https://r7rs.org/large/fascicles/macro/1/editors-intro.html)
 - [#126 "R6RS and R7RS-large" — scheme/r7rs issues](https://codeberg.org/scheme/r7rs/issues/126)
 - [#5 "General principle: What is mandatory for R7RS Large implementations?" — scheme/r7rs issues](https://codeberg.org/scheme/r7rs/issues/5)
 - [#127 "RωRS" — scheme/r7rs issues](https://codeberg.org/scheme/r7rs/issues/127)
