@@ -1,0 +1,6 @@
+# Claude Code
+# Linked git worktrees live here — keep them out of `git add -A`, which would
+# otherwise commit a stray gitlink to the nested checkout.
+.claude/worktrees/
+# Per-user local settings (the shared config, e.g. launch.json, stays tracked).
+.claude/settings.local.json
