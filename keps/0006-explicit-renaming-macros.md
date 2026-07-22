@@ -297,11 +297,12 @@ whether the approximation holds up — see Unresolved question 2.
    prerequisite above), and stores it as an `.explicit_renaming`
    transformer.
 3. **Macro-use dispatch branches on `kind`.** For `.explicit_renaming`, call
-   the stored closure with `(form rename compare)` — `form` unwrapped the
-   same way `expandMacro` does today, or the whole use-form including the
-   keyword (Chibi's convention); picking one is Unresolved question 1. The
-   closure's return value becomes the expansion, fed into the same
-   downstream pipeline `expandMacro`'s result feeds today.
+   the stored closure with `(form rename compare)`, where `form` is the whole
+   use-form including the keyword — the SRFI 211 / Chibi convention (see
+   Unresolved question 1), not the keyword-stripped tail `expandMacro` uses
+   internally for `syntax-rules`. The closure's return value becomes the
+   expansion, fed into the same downstream pipeline `expandMacro`'s result
+   feeds today.
 4. **No new heap type, no phase separation, no `syntax->datum`/
    `datum->syntax`.** The transformer operates on plain data in, plain data
    out — the same representation `syntax-rules` templates already produce.
@@ -451,33 +452,86 @@ second, parallel mechanism to maintain.
 
 ## Unresolved questions
 
-1. **What exactly does the transformer procedure receive?** The whole
-   macro use-form including the keyword (Chibi's convention) or just the
-   arguments (`expandMacro`'s current convention, stripping the keyword via
-   `types.cdr(expr)`)? Picking Chibi's whole-form convention makes porting
-   existing `er-macro-transformer` libraries more direct.
+Questions 1 and 5 are resolved by SRFI 211 (Scheme Macro Libraries,
+finalized 2022), the portable standard that fixes the `er-macro-transformer`
+contract; 2 and 3 are narrowed to a concrete test and a recommended policy;
+4 is inherently empirical. The research trail is kept rather than deleted so
+the reasoning survives.
+
+1. **What does the transformer procedure receive? — Resolved: the whole
+   use-form, keyword included.** SRFI 211 specifies the transformer is
+   "called with three arguments, the fully unwrapped input form and two
+   procedures `rename` and `compare`" — the *entire* macro use, not the
+   keyword-stripped tail. Chibi follows this (its `cond`/`case` destructure
+   the whole form). Kaappi's `syntax-rules` path strips the keyword
+   internally (`types.cdr(expr)` in `expandMacro`) only because the pattern's
+   first element is the `_` placeholder; that is a matcher detail and does
+   not constrain the `er` path, which passes the whole form for portability
+   and so a transformer can re-emit recursive uses and report errors against
+   its own keyword. (The guide-level `swap!`/`match` examples already assume
+   this; updates Surface changes, item 3.)
 2. **Does `compare` need definition-site environment awareness, or is the
-   binding-slot approximation sufficient** for the cases Kaappi's own
-   library ecosystem would actually exercise? Worth a spike (re-porting a
-   macro like `cond`-with-`else`/`=>` under this mechanism) before
-   committing to the API.
-3. **`kaappi check`/`--sandbox` policy, precisely.** Candidate answers: (a)
-   transformer bodies always run under `check`/`--sandbox`, documented as
-   "macro-defining code is compile-time code, not sandboxed program code";
-   (b) transformer bodies run under the *same* sandbox restrictions as the
-   rest of the file; (c) `check` refuses to fully expand files that define
-   `.explicit_renaming` transformers and reports a diagnostic instead. No
-   candidate has been evaluated against `docs/dev/check.md`'s existing
-   guarantees in enough depth to recommend one yet.
+   binding-slot approximation sufficient?** SRFI 211 pins the *target*: it
+   defines `compare` as `free-identifier=?` — "do these two identifiers
+   denote the same binding (or are both unbound) in the use environment,"
+   hygiene included, not raw symbol equality. The canonical exercise is
+   auxiliary-keyword detection in `cond`/`case`; Chibi's `cond` calls
+   `(compare (rename 'else) (car cl))` and `(compare (rename '=>) (cadr cl))`,
+   exactly the spike this KEP proposes. The concrete, falsifiable acceptance
+   test is four quadrants against a re-ported `cond`: (i) `(cond (else X))`
+   fires the else clause; (ii) `(let ((else 1)) (cond (else X)))` does *not*
+   (the keyword is shadowed); (iii) an outer macro that *introduces* `else`
+   into a `cond` it emits still fires, by hygiene; (iv) the `=>` variants.
+   Kaappi's existing pieces — `isWellKnown` for `else`/`=>`, and
+   `matchPattern`'s `literal_bound` + `use_check.resolve` binding check —
+   cover (i) and (ii); the open risk is (iii), a `compare` with a *marked*
+   identifier on one side, where binding-slot comparison can diverge from
+   Chibi's full `identifier=?`. If a re-ported `cond` passes all four
+   quadrants the approximation is sufficient; if (iii) fails, that is the
+   precise signal that full lexical-environment comparison is required.
+3. **`kaappi check`/`--sandbox` policy, precisely. — Recommend candidate (a),
+   to be ratified before shipping.** The candidates: (a) transformer bodies
+   always run under `check`/`--sandbox`, documented as "macro-defining code is
+   compile-time code, not sandboxed program code"; (b) they run under the
+   *same* sandbox restrictions as the program; (c) `check` refuses to fully
+   expand files defining `.explicit_renaming` transformers. Prior art settles
+   the principle: procedural macro expansion *is* arbitrary compile-time code
+   execution — Racket's reference notes its sandbox "cannot fully contain
+   compile-time macro execution," and draws the trust boundary at what
+   compile-time code can *reach* (a restricted module language and collection
+   set), not at pretending expansion runs nothing. `check`'s "executes no
+   *program* code" promise holds today only because `syntax-rules` expansion
+   is pure Zig; `er` bodies necessarily run during expansion, extending the
+   category of compile-time code `check` already runs for effect
+   (`import`/`define-library`/`define-record-type`). Candidate (c) would
+   cripple `check` for any file using `er`-macros and diverges from every
+   other Scheme; (b) conflates the two phases. Hence (a), with the
+   `--sandbox` boundary modeled on Racket's capability/reach approach. This
+   stays a security gate to settle by design (Implementation plan, step 2),
+   and it forces one documentation fix: `docs/dev/check.md`'s claim that a
+   same-file macro use "expands correctly without running anything" stops
+   being true once `er`-macros exist.
 4. **Does Kaappi's own SRFI-porting style actually prefer this once it
-   exists**, or do contributors keep reaching for `syntax-rules`-plus-idioms
-   out of habit? Only observable after this ships and a few more
-   pattern-matcher-shaped SRFIs get ported with it available.
-5. **Should the naming (`er-macro-transformer`) match Chibi Scheme's
-   exactly**, to maximize direct portability of existing libraries written
-   against it, or diverge where Kaappi's calling convention differs for a
-   good reason? Leans toward matching unless a concrete reason not to
-   surfaces during implementation.
+   exists?** Inherently empirical — a question about Kaappi's own
+   contributors, not answerable from outside. The directional signal from
+   prior art is that procedural transformers get used when available (Chibi
+   implements `syntax-rules` itself on top of `er-macro-transformer`; CHICKEN
+   added `ir-macro-transformer` on top of `er` once the primitive existed),
+   but Kaappi-specific adoption is only observable after shipping — which is
+   exactly what Implementation-plan step 5 (re-port SRFI 241/202) is designed
+   to measure.
+5. **Should the naming (`er-macro-transformer`) match Chibi Scheme's exactly?
+   — Resolved: match SRFI 211, which is Chibi's convention.** SRFI 211
+   standardizes `er-macro-transformer` with exactly this whole-form +
+   `rename`/`compare` (= `free-identifier=?`) contract, exported from the
+   library `(srfi 211 explicit-renaming)` (siblings
+   `(srfi 211 implicit-renaming)` and `(srfi 211 syntactic-closures)`).
+   Matching Chibi and being portable are therefore the same choice, and it
+   pins the whole contract, not just the name. This refines
+   Implementation-plan step 6: prefer SRFI 211's standard library-presence
+   feature test — `(cond-expand ((library (srfi 211 explicit-renaming)) ...))`
+   — over a bespoke `kaappi-er-macros` symbol, with a kaappi-native alias
+   alongside if wanted.
 
 ## Implementation plan
 
@@ -514,10 +568,13 @@ question 3) is settled by design before it can be a security incident.
    concrete, falsifiable signal that this delivered what the KEP set out to
    fix. If they can't be lifted cleanly, that is equally valuable signal
    that the design needs another iteration before wider use.
-6. **Document as a Kaappi extension**, in the same spirit as KEP-0004: a
-   `cond-expand` feature identifier (e.g. `kaappi-er-macros`) and a
-   kaappi-lang.org page stating plainly that this is beyond R7RS-small and
-   is *not* R7RS-large's eventual `syntax-case` (see KEP-0007).
+6. **Document as a Kaappi extension**, in the same spirit as KEP-0004: expose
+   `er-macro-transformer` under the SRFI 211 library
+   `(srfi 211 explicit-renaming)` so portable code can feature-test it with
+   `(cond-expand ((library (srfi 211 explicit-renaming)) ...))` (a
+   kaappi-native alias/feature may sit alongside), and a kaappi-lang.org page
+   stating plainly that this is beyond R7RS-small and is *not* R7RS-large's
+   eventual `syntax-case` (see KEP-0007).
 
 ## Sources
 
@@ -528,6 +585,7 @@ question 3) is settled by design before it can be a security incident.
 - [SRFI 149: Basic Syntax-rules Template Extensions](https://srfi.schemers.org/srfi-149/srfi-149.html)
 - [SRFI 211: Scheme Macro Libraries](https://srfi.schemers.org/srfi-211/srfi-211.html) — portable namespaces and `cond-expand` features for `er-macro-transformer` and its siblings (Nieper-Wißkirchen, finalized 2022)
 - [Syntax definitions — Scheme Surveys](https://docs.scheme.org/surveys/syntax-definitions/) — which implementations support explicit renaming
+- [Racket Reference §14.12: Sandboxed Evaluation](https://docs.racket-lang.org/reference/Sandboxed_Evaluation.html) — prior art that compile-time macro expansion is arbitrary code execution a sandbox cannot fully contain (Unresolved question 3)
 - William D. Clinger, "Hygienic Macros Through Explicit Renaming," *Lisp Pointers* IV(4):25–28, 1991 — the original ER paper
 - William D. Clinger & Jonathan Rees, "Macros That Work," *POPL* 1991 — the pattern-plus-hygiene algorithm ER exposes as `rename`/`compare`
 - Alan Bawden & Jonathan Rees, "Syntactic Closures," *ACM Conf. on LISP and Functional Programming*, 1988 — the sibling low-level system ER simplifies
