@@ -93,6 +93,35 @@ more in the spirit of Scheme" than `syntax-case`, while noting neither gives
 as clean an answer to *deliberately* breaking hygiene — a tradeoff this KEP
 makes deliberately, see Alternatives considered.
 
+### Prior art
+
+Explicit renaming is well-trodden ground — new to Kaappi, not to Scheme.
+William Clinger introduced it (*"Hygienic Macros Through Explicit
+Renaming,"* Lisp Pointers IV(4), 1991) as a deliberately small **procedural
+interface over the hygiene algorithm of "Macros That Work"** (Clinger &
+Rees, POPL 1991) — the same family of pattern-plus-hygiene algorithm
+Kaappi's `matchPattern`/`renameForHygiene` already implement. `rename` and
+`compare` are essentially the two primitives that algorithm needs
+internally, which is the historical grounding for this KEP's claim that
+they are a *procedure wrapper around existing machinery, not new mechanism*.
+ER is the middle of three low-level systems — syntactic closures (Bawden &
+Rees, 1988) and `syntax-case` (Dybvig, Hieb & Bruggeman, 1992) are the
+others — whose relative expressiveness is still a genuinely open question,
+so adopting ER is not settling for a weaker `syntax-case`, only choosing a
+different point in the design space (see KEP-0007).
+
+The `(form rename compare)` convention has broad precedent: MIT/GNU Scheme
+(which implements ER *atop* its syntactic-closures layer), CHICKEN (which
+later added the implicit-renaming inverse `ir-macro-transformer` in 4.7),
+Gauche, Larceny, Sagittarius, Picrin, and — most directly relevant —
+**Chibi Scheme, which implements `syntax-rules` itself on top of
+`er-macro-transformer`**, a real-world instance of exactly the layering
+this KEP proposes. SRFI 211 (Nieper-Wißkirchen, finalized 2022) already
+standardizes a portable library namespace and `cond-expand` feature for
+`er-macro-transformer` and its siblings, so the feature identifier in
+Implementation-plan step 6 has a conventional name to adopt rather than one
+to invent.
+
 ## Guide-level explanation
 
 What today's workaround looks like (from the shipped `lib/srfi/241.sld`) —
@@ -456,3 +485,9 @@ question 3) is settled by design before it can be a security incident.
 - [chibi-scheme `init-7.scm` (er-macro-transformer, make-renamer, cond)](https://github.com/ashinn/chibi-scheme/blob/master/lib/init-7.scm)
 - [Precise definition of er-macro-transformer — chibi-scheme mailing list](https://groups.google.com/g/chibi-scheme/c/2i3R4vwicp8/m/8IG640naKgAJ)
 - [SRFI 149: Basic Syntax-rules Template Extensions](https://srfi.schemers.org/srfi-149/srfi-149.html)
+- [SRFI 211: Scheme Macro Libraries](https://srfi.schemers.org/srfi-211/srfi-211.html) — portable namespaces and `cond-expand` features for `er-macro-transformer` and its siblings (Nieper-Wißkirchen, finalized 2022)
+- [Syntax definitions — Scheme Surveys](https://docs.scheme.org/surveys/syntax-definitions/) — which implementations support explicit renaming
+- William D. Clinger, "Hygienic Macros Through Explicit Renaming," *Lisp Pointers* IV(4):25–28, 1991 — the original ER paper
+- William D. Clinger & Jonathan Rees, "Macros That Work," *POPL* 1991 — the pattern-plus-hygiene algorithm ER exposes as `rename`/`compare`
+- Alan Bawden & Jonathan Rees, "Syntactic Closures," *ACM Conf. on LISP and Functional Programming*, 1988 — the sibling low-level system ER simplifies
+- R. Kent Dybvig, Robert Hieb & Carl Bruggeman, "Syntactic Abstraction in Scheme," *Lisp and Symbolic Computation* 5(4), 1992 — `syntax-case` (see KEP-0007)
