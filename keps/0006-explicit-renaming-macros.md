@@ -7,18 +7,21 @@
 | **Author** | Baiju Muthukadan <baiju.m.mail@gmail.com> |
 | **Status** | Draft |
 | **Type** | Standards |
-| **Target** | `kaappi` core (`expander.zig`, `compiler_macro.zig`, `types.zig`, `vm_library.zig`) |
+| **Target** | `kaappi` core (`expander.zig`, `compiler_macro.zig`, `types.zig`, `vm_library.zig`, `memory.zig`, `gc_collect.zig`) |
 | **Created** | 2026-07-21 |
 | **Requires** | — |
 | **Supersedes** | — |
 
 *All code references are pinned to kaappi commit
-[`fe05ec92`](https://github.com/kaappi/kaappi/commit/fe05ec92) (main, 2026-07-21)
-and were read directly from that source. See KEP-0007 for the (deferred)
-full `syntax-case` alternative and the R7RS-large research behind choosing
-not to pursue it now — split out of an earlier draft of this KEP because the
-two proposals have no build-order dependency on each other and belong under
-different `Status` fields.*
+[`7949e497`](https://github.com/kaappi/kaappi/commit/7949e497) (main, 2026-07-21)
+and were read directly from that source. That commit completed the SRFI
+Phase 1 milestone — it added `lib/srfi/241.sld` and `lib/srfi/202.sld` — so
+both the Zig engine references below and the shipped SRFI ports this KEP
+cites as evidence exist and are readable at that single revision. See
+KEP-0007 for the (deferred) full `syntax-case` alternative and the
+R7RS-large research behind choosing not to pursue it now — split out of an
+earlier draft of this KEP because the two proposals have no build-order
+dependency on each other and belong under different `Status` fields.*
 
 ## Summary
 
@@ -170,15 +173,17 @@ consider:
   macro use, not as an uncaught runtime exception three layers into the
   expander.
 - **`kaappi check` / `--sandbox` interaction — the sharpest finding here.**
-  `kaappi check` is documented (`docs/dev/check.md`) as read-only: "reads,
-  expands, compiles, executes nothing." That promise is airtight *today*
-  specifically because expansion is pure Zig with no VM calls. The instant
-  a transformer is a called procedure, `kaappi check`-ing a file that
-  defines one **does execute Scheme code** — the transformer body — even
-  though the check still never executes the *program's* top-level code.
-  Whether that's an acceptable, clearly-documented carve-out or something
-  `--sandbox` needs to additionally gate is a real design decision — see
-  Unresolved questions.
+  `kaappi check` is documented (`docs/dev/check.md`) as compile-only: it
+  "reads, macro-expands, and compiles every top-level form ... but executes
+  no *program* code." That promise is airtight *today* specifically because
+  expansion is pure Zig with no VM calls. The instant a transformer is a
+  called procedure, `kaappi check`-ing a file that defines one **does
+  execute Scheme code** — the transformer body — even though the check still
+  never executes the *program's* top-level code. The doc's own "no *program*
+  code" wording already draws exactly this compile-time-vs-program line, but
+  whether running transformer bodies under `check` is an acceptable,
+  clearly-documented carve-out or something `--sandbox` needs to additionally
+  gate is a real design decision — see Unresolved questions.
 - **WASM / native-compile backend.** Both `zig build wasm` and `kaappi
   compile`'s LLVM backend share the same front-end pipeline through
   expansion, so this has to work identically there. Mechanically low-risk
@@ -269,13 +274,24 @@ whether the approximation holds up — see Unresolved question 2.
    `datum->syntax`.** The transformer operates on plain data in, plain data
    out — the same representation `syntax-rules` templates already produce.
 
-Estimated blast radius, from a direct count against `fe05ec92`:
-`Transformer` is consumed at 23 call sites across 6 files
-(`compiler_lambda.zig`, `compiler_macro.zig`, `expander.zig`,
-`gc_deep_copy.zig`, `tests_deepcopy.zig`, `types.zig`, plus
-`vm_library.zig` for library-body macros). Every one needs a `switch` on
-the new `kind` tag or an early return for the non-`syntax_rules` case —
-mechanical, but real.
+Estimated blast radius, from a direct count against `7949e497`:
+`Transformer` is consumed across **nine** files. Seven treat it as a
+`syntax-rules` rule set — reading `patterns`/`templates`/`num_rules`/
+`literal_bound`, capturing locals onto it, or naming its type — and each
+needs a `switch` on the new `kind` tag or an early return for the
+non-`syntax_rules` case: `compiler_lambda.zig`, `compiler_macro.zig`,
+`expander.zig`, `gc_deep_copy.zig`, `tests_deepcopy.zig`, `types.zig`, and
+`vm_library.zig` (library-body macros). The other two are the GC files, and
+they are the load-bearing ones: `memory.zig` needs an `allocTransformer`
+sibling that stores the closure `Value`, and `gc_collect.zig` handles the
+`.transformer` heap tag in five arms — `referencesYoung` (the generational
+write barrier), `markObjectContents` and `markValueInner` (marking),
+`objectSize`, and `freeObject`. The two marking arms and the barrier are a
+**GC-safety correctness obligation, not mechanical plumbing**: the
+`.explicit_renaming` variant's closure `Value` must be traced there, or the
+collector frees a closure a live macro still references — a use-after-free.
+That is a second, distinct GC hazard on top of the reentrant-execution
+rooting flagged in the prerequisite section above.
 
 ## Drawbacks
 
@@ -411,11 +427,13 @@ question 3) is settled by design before it can be a security incident.
 2. **Resolve Unresolved question 3** (the `check`/`--sandbox` policy) as a
    short, standalone design note before writing user-facing macro syntax —
    this is the one item with security consequences if skipped.
-3. **`types.Transformer` gains its `kind` tag**; audit and update all 23
-   existing call sites (the six files listed in Reference-level design) to
+3. **`types.Transformer` gains its `kind` tag**; audit and update every
+   call site across the nine files listed in Reference-level design to
    handle both kinds, with the `.syntax_rules` path byte-for-byte unchanged
    in behavior — verified by the existing hygiene/macro test suites passing
-   with zero modifications.
+   with zero modifications. Include `gc_collect.zig`'s marking arms in this
+   audit: tracing the new closure `Value` is a correctness requirement, not
+   optional cleanup, and is the easiest thing to forget.
 4. **`er-macro-transformer` special form + `rename`/`compare`
    implementation**, reusing `renameForHygiene` and the literal-matching
    logic identified in Reference-level design rather than rebuilding either.
