@@ -55,6 +55,7 @@ Withdrawn   Rejected / Superseded
 | [0010](keps/0010-llvm-native-backend.md) | The LLVM Native Backend | Draft (Informational) | `kaappi` core, `kaappi.github.io` |
 | [0011](keps/0011-ffi-and-sandbox.md) | The FFI Subsystem and the Sandbox Boundary | Draft (Informational) | `kaappi` core, `kaappi.github.io` |
 | [0012](keps/0012-thottam-package-manager.md) | thottam — The Package Manager | Draft (Informational) | `kaappi` core, `kaappi.github.io` |
+| [0013](keps/0013-wasm-target.md) | The WebAssembly (wasm32-wasi) Target | Draft (Informational) | `kaappi` core, `kaappi.github.io` |
 
 ## License
 
