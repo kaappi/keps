@@ -56,6 +56,7 @@ Withdrawn   Rejected / Superseded
 | [0011](keps/0011-ffi-and-sandbox.md) | The FFI Subsystem and the Sandbox Boundary | Draft (Informational) | `kaappi` core, `kaappi.github.io` |
 | [0012](keps/0012-thottam-package-manager.md) | thottam — The Package Manager | Draft (Informational) | `kaappi` core, `kaappi.github.io` |
 | [0013](keps/0013-wasm-target.md) | The WebAssembly (wasm32-wasi) Target | Draft (Informational) | `kaappi` core, `kaappi.github.io` |
+| [0014](keps/0014-sbc-bytecode-format.md) | The `.sbc` Bytecode File Format and Compile Cache | Draft (Informational) | `kaappi` core, `kaappi.github.io` |
 
 ## License
 
