@@ -59,6 +59,7 @@ Withdrawn   Rejected / Superseded
 | [0014](keps/0014-sbc-bytecode-format.md) | The `.sbc` Bytecode File Format and Compile Cache | Draft (Informational) | `kaappi` core, `kaappi.github.io` |
 | [0015](keps/0015-language-server.md) | The Language Server (kaappi-lsp) | Draft (Informational) | `kaappi` core, `vscode-kaappi`, `kaappi.github.io` |
 | [0016](keps/0016-fmt-and-check.md) | The Canonical Formatter (kaappi fmt) and Static Linter (kaappi check) | Draft (Informational) | `kaappi` core, `kaappi.github.io` |
+| [0017](keps/0017-gc-and-value-model.md) | The Value Representation and Per-Heap Garbage Collector | Draft (Informational) | `kaappi` core |
 
 ## License
 
