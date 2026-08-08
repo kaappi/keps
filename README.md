@@ -62,6 +62,7 @@ Withdrawn   Rejected / Superseded
 | [0017](keps/0017-gc-and-value-model.md) | The Value Representation and Per-Heap Garbage Collector | Draft (Informational) | `kaappi` core |
 | [0018](keps/0018-macro-expander-hygiene.md) | The Macro Expander — Expansion Algorithm and Hygiene Mechanism | Draft (Informational) | `kaappi` core |
 | [0019](keps/0019-reader.md) | The Datum Reader | Draft (Informational) | `kaappi` core |
+| [0020](keps/0020-ir-and-bytecode-emission.md) | The IR Pipeline and Bytecode Emitter | Draft (Informational) | `kaappi` core |
 
 ## License
 
