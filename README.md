@@ -52,6 +52,8 @@ Withdrawn   Rejected / Superseded
 | [0007](keps/0007-full-syntax-case-support.md) | Full syntax-case Support (Deferred) | Draft (Informational) | `kaappi` core |
 | [0008](keps/0008-shared-ir-contract.md) | A Shared IR Contract for kaappi, paal, and chaaya | Draft | `kaappi` core, `paal`, `chaaya` |
 | [0009](keps/0009-version-library.md) | A `(kaappi version)` Library for SemVer 2.0.0 | Draft | `kaappi` core, `kaappi.github.io` |
+| [0010](keps/0010-llvm-native-backend.md) | The LLVM Native Backend | Draft (Informational) | `kaappi` core, `kaappi.github.io` |
+| [0011](keps/0011-ffi-and-sandbox.md) | The FFI Subsystem and the Sandbox Boundary | Draft (Informational) | `kaappi` core, `kaappi.github.io` |
 
 ## License
 
