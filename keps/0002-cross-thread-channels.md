@@ -5,7 +5,7 @@
 | **KEP** | 0002 |
 | **Title** | Cross-Thread Channels and Multi-Core Fiber Scheduling |
 | **Author** | Baiju Muthukadan <baiju.m.mail@gmail.com> |
-| **Status** | Accepted |
+| **Status** | Accepted (amended 2026-07-16: §6 capacity-0 rendezvous; amended 2026-08-27: [As implemented](#as-implemented-v0150v0160--amended-2026-08-27) — channel identity and join-notify open, tracked in kaappi) |
 | **Type** | Standards |
 | **Target** | `kaappi` core (GC/scheduler/reactor/channels), new `(kaappi parallel)` library, with downstream effects on `kaappi-net`, `kaappi-http` |
 | **Created** | 2026-07-12 |
@@ -18,6 +18,13 @@
 Zig standard-library claims were verified against Zig 0.16.0. The two
 behavior experiments in the Motivation were run on macOS aarch64,
 ReleaseSafe, at that commit.*
+
+*Amended 2026-08-27: the design below shipped — Phases 1–5 and 7 (plus both
+envelope-elision levers) in kaappi v0.15.0, the 2026-07-16 §6 rendezvous
+amendment in v0.16.0, and the §9 ecosystem phase in the downstream repos.
+The [As implemented](#as-implemented-v0150v0160--amended-2026-08-27) section
+records the PR trail and the divergences — one of them (channel identity,
+Unresolved question 4) unimplemented and now tracked.*
 
 ## Summary
 
@@ -508,7 +515,13 @@ GC-managed object, no cross-heap tracing is ever needed.
 so raw `eq?` would report `#f` for "the same channel" seen from two threads.
 `eqv?`/`equal?` (and the scheduler's waiter matching, §5) compare the
 `shared` pointer when both operands are promoted channels (Unresolved
-question 4 confirms the exact predicate set).
+question 4 confirms the exact predicate set). *(Amended 2026-08-27: this
+paragraph did not ship — `eqv?`, `equal?`, and every predicate built on
+them compare channel stubs by heap identity today, `write` prints a bare
+`#<channel>`, and the alias arm allocates a fresh stub per copy with no
+per-heap dedup, so the same channel received twice is not `eqv?` to itself
+on one thread. See Unresolved question 4's amendment; tracked in
+[kaappi#2394](https://github.com/kaappi/kaappi/issues/2394).)*
 
 **Foreign channel objects become a descriptive error — promoted or not.**
 Every channel primitive checks `ch.header.owner != gc.id` and raises
@@ -851,7 +864,13 @@ fiber-only backpressure stays on the lock-free path.
   ([`primitives_srfi18.zig:431`](https://github.com/kaappi/kaappi/blob/54706a0c/src/primitives_srfi18.zig#L431)),
   implemented on the reactor timer heap that timed waits already use.
   Without `timeout-val`, expiry raises (matching `thread-join!`'s
-  `join-timeout`); with one, it is returned. Send timeouts exist for
+  `join-timeout`); with one, it is returned. *(Amended 2026-08-27: the
+  shipped implementation raises a distinct `channel-timeout` condition and
+  exports `channel-timeout-exception?` to test it — the SRFI-18
+  `join-timeout-exception?` analog — a function named nowhere in the design
+  sections above; the user-docs gap is tracked in
+  [kaappi#2396](https://github.com/kaappi/kaappi/issues/2396).)* Send
+  timeouts exist for
   symmetry: Drawbacks leans on timeouts as the escape hatch for weakened
   deadlock detection, and a sender parked on a full channel in a
   cross-thread deadlock needs the same hatch as a receiver. A timed-out
@@ -1214,6 +1233,8 @@ port-first order sketched above.
   documented in the guide (don't capture channels you want kept local).
 - **`eq?` on channels is no longer identity across threads** (stubs);
   `eqv?`/`equal?` compensate, but it is a subtlety users can trip on.
+  *(Amended 2026-08-27: the compensation is not implemented — see §2's
+  amendment and Unresolved question 4 / kaappi#2394.)*
 - **Channel dispatch branch** on every send/receive — one predictable
   null-check on the local fast path; expected unmeasurable, verified in
   Phase 1 benchmarks.
@@ -1434,7 +1455,9 @@ the §9 accept-distribution measurement (P7).*
      struct + root buffer, far past the pre-registered "≥ 2× on fixnums"
      bar. Implemented in the real `send`/`receive` path behind
      `-Dchannel-instrument` as gate lever `c`; promoting it to the
-     unconditional shipped default is a mechanical follow-up.
+     unconditional shipped default is a mechanical follow-up. *(Done:
+     [#1550](https://github.com/kaappi/kaappi/pull/1550) promoted lever `c`
+     to the unconditional default in v0.15.0, 2026-07-15.)*
    - **(B) reusable per-channel arena — not adopted; pending clause 2.** The
      "≥ 30% on small messages" clause holds under the shipped ReleaseSafe
      build (57–98%) but not under ReleaseFast (the 1 KiB string wins only
@@ -1444,6 +1467,15 @@ the §9 accept-distribution measurement (P7).*
      benchmark arena is symbol-free and does not settle it). Until a
      prototype clears clause 2, the per-message GC struct (lever `none`)
      stays.
+
+     *(Superseded 2026-07-15, recorded 2026-08-27: the prototype
+     ([#1555](https://github.com/kaappi/kaappi/pull/1555)) cleared clause 2 —
+     a real arena in `shared_channel.zig` surviving the gc-stress/leak
+     suite with no new lifetime rule outside that file, the literal
+     one-arena-per-channel shape adapted along the way — and
+     [#1560](https://github.com/kaappi/kaappi/pull/1560) shipped it as the
+     default in v0.15.0 (`-Dchannel-arena` on; `=false` restores lever A).
+     See the Phase 7 write-up, "The `shared_channel.zig` arena".)*
    - **(D) refcounted immutable side-heap — deferred to the KEP-0003 gate
      ([kaappi#1474](https://github.com/kaappi/kaappi/issues/1474)),** as
      pre-registered. Implemented behind the flag and measured: a bytevector
@@ -1485,26 +1517,56 @@ the §9 accept-distribution measurement (P7).*
    referenced". The narrowed question: is the coarse "other live threads
    exist" disjunct still needed at all, or can it be dropped in favor of
    pure refcount reasoning? Settle during Phase 3 review with the test
-   matrix.
+   matrix. *(Settled in Phase 3: both disjuncts kept — shipped as
+   `sc.refCount() > 1 or srfi18.crossThreadWaitPossible()`
+   (`primitives_fiber.zig`), with shared-waiter enrollment unconditional
+   (`shared_channel.zig`).)*
 3. **Unify `thread-join!` timeouts with the notifier.** The OS-thread join
    path polls status at 1 ms
    ([`primitives_srfi18.zig:449`](https://github.com/kaappi/kaappi/blob/54706a0c/src/primitives_srfi18.zig#L449));
    a child could `notify` its parent at exit instead. In scope for Phase 3
-   if cheap, else follow-up.
+   if cheap, else follow-up. *(Follow-up branch taken; now tracked as
+   [kaappi#2395](https://github.com/kaappi/kaappi/issues/2395) — the timed
+   join and the cross-thread mutex/condvar waits still poll at ~1 ms.)*
 4. **Equality surface.** Exactly which predicates unwrap stubs: `eqv?` and
    `equal?` certainly; does `eq?` too (making stubs fully transparent, at
    the cost of a special case in a hot primitive)? Also: should `write`
    print a stable shared-channel id for debugging?
+
+   *(Amended 2026-08-27: none shipped — this is a live divergence from §2,
+   not an open design choice: `eqv?` (`eqvP`), `equal?` (`deepEqual`), and
+   `isEqv` (`memv`/`member`/`assv`, hashtable `eqv?` keys) all compare
+   stubs by heap identity; `eq?` was never special-cased; `write` prints
+   `#<channel>` with no shared id. Tracked in
+   [kaappi#2394](https://github.com/kaappi/kaappi/issues/2394), whose
+   research frames a three-way decision: extend the predicates as
+   specified; drop the promise; or — the leading candidate — replace it
+   with a SRFI-128 comparator (`channel=?`/`channel-hash`/
+   `channel-comparator` over the already-shipped `channel?`, with
+   SRFI-113/125 consumers), the R7RS-large idiom for per-type
+   equality+hash. R7RS-small is neutral: it defines no channels, and the
+   only invariants it imposes on the lattice (`eq?` ⇒ `eqv?`,
+   `eqv?` ⇒ `equal?`) hold today and under every proposed outcome — full
+   analysis on the issue.)*
 5. **`parallel-map` chunking policy** (one task per element vs. N chunks)
    and whether `pool-submit` results should be first-class channels (as
    specified) or an opaque `task` record. Library-level; decide in Phase 5
-   with usage feedback from the examples repo.
+   with usage feedback from the examples repo. *(Settled in Phase 5: one
+   task per element — per-task submission overhead was acceptable, and the
+   library documents manual chunking (one task per processor over input
+   slices) for very large inputs, with `kaappi-examples/parallel-primes`
+   as the worked example; `pool-submit` returns the reply channel as
+   specified, and `task-wait` receives it.)*
 6. **Cycle leaks.** §1 accepts that reference counting never reclaims a
    channel kept alive only by stubs inside its own (or a peer's) queued
    envelopes. Revisit after Phase 5 if real programs form such cycles;
    the candidates are a debug-build cycle reporter (trial deletion over
    the stub graph at leak-check time) or documentation alone. A general
-   cycle collector is out of proportion to the structure.
+   cycle collector is out of proportion to the structure. *(Closed
+   2026-08-27: documentation alone. Phases 5–6 have shipped and no field
+   evidence of abandoned-channel cycles has appeared; the unit suite's
+   leak checking keeps accidental cycles loud in tests. Reopens only on
+   field evidence.)*
 
 ## Implementation plan
 
@@ -1588,3 +1650,75 @@ arena (and/or immediate fast path) if Phase 1/3 numbers demand it;
 send storms; tail latency of a fiber server under concurrent large sends
 (the head-of-line drawback); symbol-table lock contention with
 symbol-heavy messages across many threads (§1).
+
+## As implemented (v0.15.0/v0.16.0) — amended 2026-08-27
+
+All seven phases shipped: Phases 1–5, the Phase 7 gate campaign, and both
+envelope-elision levers in **kaappi v0.15.0** (merged 2026-07-12/15); the
+rendezvous semantics of the 2026-07-16 §6 amendment in **v0.16.0**; the §9
+ecosystem phase in the downstream repos on 2026-07-14 (kaappi-http#4;
+kaappi-net's `tcp-listen-reuseport` / `reuseport-balances?`).
+
+| Phase | PR | What landed |
+|-------|----|-------------|
+| 1 | [#1482](https://github.com/kaappi/kaappi/pull/1482) | SharedChannel core: shared-object protocol, promotion, reservation send/receive |
+| 2 | [#1483](https://github.com/kaappi/kaappi/pull/1483) | Envelopes at thread boundaries: `thread-start!`/`thread-join!` |
+| 3 | [#1485](https://github.com/kaappi/kaappi/pull/1485) (+ [#1486](https://github.com/kaappi/kaappi/pull/1486) review nits) | `ThreadNotifier`, unconditional sweep, shared-waiter registry |
+| 4 | [#1502](https://github.com/kaappi/kaappi/pull/1502) | Capacity, timeouts, close |
+| 5 | [#1522](https://github.com/kaappi/kaappi/pull/1522) | `(kaappi parallel)`: pools, `parallel-map`, `processor-count` |
+| 7 | [#1535](https://github.com/kaappi/kaappi/pull/1535), [#1546](https://github.com/kaappi/kaappi/pull/1546), [#1549](https://github.com/kaappi/kaappi/pull/1549), [#1580](https://github.com/kaappi/kaappi/pull/1580), [#1581](https://github.com/kaappi/kaappi/pull/1581) | A/B/C/D envelope-cost matrix, gate harness + lever D, macOS/Linux gate datasets, worksheet; lever C default [#1550](https://github.com/kaappi/kaappi/pull/1550), lever B default [#1560](https://github.com/kaappi/kaappi/pull/1560) |
+| §6 amendment | [#1604](https://github.com/kaappi/kaappi/pull/1604) (issues [#1600](https://github.com/kaappi/kaappi/issues/1600)/[#1601](https://github.com/kaappi/kaappi/issues/1601)) | rendezvous `(make-channel 0)`, model findings 4–6 repaired |
+
+### What shipped as designed
+
+§§1–5 and §7 landed as specified: promotion with publish-before-drain and
+local-waiter migration, the §4 reservation protocol with all six model
+findings' repairs, the §5 notifier (`EVFILT.USER`/`eventfd`) with the
+unconditional sweep at both wake-check sites, §6's
+capacity/timeouts/close and eof-send rejection, the §8 library, and §9's
+server with the measured Darwin fd-distributor fallback. The TLA witness
+configs named in the Overview (`rv_noring`, `rv2_popwindow`, `rva_naive`,
+…) live in this repository's `research/tla/`. Lever D stayed unshipped per
+the gate call, retained behind `-Dchannel-instrument` for KEP-0003 gate
+re-runs (its bytevector checks later comptime-gated,
+[#1838](https://github.com/kaappi/kaappi/pull/1838), fixing #1794). One
+shipped function is named nowhere in the design sections:
+`channel-timeout-exception?`, the SRFI-18-style predicate for §6's timeout
+condition (see the §6 amendment; the user-docs gap is
+[#2396](https://github.com/kaappi/kaappi/issues/2396)).
+
+### Divergences
+
+1. **Channel identity (§2) — not implemented, tracked.** `eqv?`/`equal?`
+   compare stubs by heap identity and `write` prints no shared id; §2's
+   promise is unfulfilled. See Unresolved question 4's amendment and
+   [kaappi#2394](https://github.com/kaappi/kaappi/issues/2394).
+2. **Q1-B superseded after the resolution was written.** The arena cleared
+   clause 2 and shipped as the default (#1555 → #1560, v0.15.0); see the
+   Q1-B amendment above.
+3. **§2's foreign-handle rule tightened after acceptance** — entitlement
+   is now checked by copy *direction* (export vs. import) before `shared`
+   is read ([#1934](https://github.com/kaappi/kaappi/issues/1934) and
+   #1937 — stricter than §2's live-object scoping), foreign *thread*
+   handles are rejected
+   ([#1562](https://github.com/kaappi/kaappi/pull/1562)), three more
+   cross-heap owner checks were added
+   ([#2198](https://github.com/kaappi/kaappi/pull/2198)), and
+   cross-thread failure messages surface the real cause
+   ([#1742](https://github.com/kaappi/kaappi/issues/1742) /
+   [#1820](https://github.com/kaappi/kaappi/pull/1820)). Documented in
+   kaappi `docs/dev/thread-value-sharing.md`; nothing in §2 is
+   contradicted — the shipped model is tighter than specified.
+4. **`thread-join!`/cross-thread mutex/condvar still poll at ~1 ms**
+   (UQ3) — tracked in
+   [kaappi#2395](https://github.com/kaappi/kaappi/issues/2395).
+
+### Status of the unresolved questions after this amendment
+
+UQ1 resolved (levers B and C both promoted to shipped defaults after the
+resolution text was written; D unshipped per the gate); UQ2 settled (both
+disjuncts kept); UQ3 open and tracked (kaappi#2395); UQ4 open and tracked
+— the one design-vs-implementation divergence (kaappi#2394); UQ5 settled;
+UQ6 closed (documentation alone). Per this repository's process, the KEP
+stays `Accepted` until UQ3 and UQ4 resolve or their tracking issues close;
+everything else is reconciled.
