@@ -864,7 +864,13 @@ fiber-only backpressure stays on the lock-free path.
   ([`primitives_srfi18.zig:431`](https://github.com/kaappi/kaappi/blob/54706a0c/src/primitives_srfi18.zig#L431)),
   implemented on the reactor timer heap that timed waits already use.
   Without `timeout-val`, expiry raises (matching `thread-join!`'s
-  `join-timeout`); with one, it is returned. Send timeouts exist for
+  `join-timeout`); with one, it is returned. *(Amended 2026-08-27: the
+  shipped implementation raises a distinct `channel-timeout` condition and
+  exports `channel-timeout-exception?` to test it — the SRFI-18
+  `join-timeout-exception?` analog — a function named nowhere in the design
+  sections above; the user-docs gap is tracked in
+  [kaappi#2396](https://github.com/kaappi/kaappi/issues/2396).)* Send
+  timeouts exist for
   symmetry: Drawbacks leans on timeouts as the escape hatch for weakened
   deadlock detection, and a sender parked on a full channel in a
   cross-thread deadlock needs the same hatch as a receiver. A timed-out
@@ -1668,7 +1674,11 @@ configs named in the Overview (`rv_noring`, `rv2_popwindow`, `rva_naive`,
 …) live in this repository's `research/tla/`. Lever D stayed unshipped per
 the gate call, retained behind `-Dchannel-instrument` for KEP-0003 gate
 re-runs (its bytevector checks later comptime-gated,
-[#1838](https://github.com/kaappi/kaappi/pull/1838), fixing #1794).
+[#1838](https://github.com/kaappi/kaappi/pull/1838), fixing #1794). One
+shipped function is named nowhere in the design sections:
+`channel-timeout-exception?`, the SRFI-18-style predicate for §6's timeout
+condition (see the §6 amendment; the user-docs gap is
+[#2396](https://github.com/kaappi/kaappi/issues/2396)).
 
 ### Divergences
 
