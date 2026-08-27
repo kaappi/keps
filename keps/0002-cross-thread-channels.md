@@ -1534,13 +1534,20 @@ the §9 accept-distribution measurement (P7).*
    print a stable shared-channel id for debugging?
 
    *(Amended 2026-08-27: none shipped — this is a live divergence from §2,
-   not an open design choice. `eqv?` (`eqvP`), `equal?` (`deepEqual`), and
+   not an open design choice: `eqv?` (`eqvP`), `equal?` (`deepEqual`), and
    `isEqv` (`memv`/`member`/`assv`, hashtable `eqv?` keys) all compare
    stubs by heap identity; `eq?` was never special-cased; `write` prints
    `#<channel>` with no shared id. Tracked in
    [kaappi#2394](https://github.com/kaappi/kaappi/issues/2394), whose
-   outcome either implements the predicate set or formally drops §2's
-   promise.)*
+   research frames a three-way decision: extend the predicates as
+   specified; drop the promise; or — the leading candidate — replace it
+   with a SRFI-128 comparator (`channel=?`/`channel-hash`/
+   `channel-comparator` over the already-shipped `channel?`, with
+   SRFI-113/125 consumers), the R7RS-large idiom for per-type
+   equality+hash. R7RS-small is neutral: it defines no channels, and the
+   only invariants it imposes on the lattice (`eq?` ⇒ `eqv?`,
+   `eqv?` ⇒ `equal?`) hold today and under every proposed outcome — full
+   analysis on the issue.)*
 5. **`parallel-map` chunking policy** (one task per element vs. N chunks)
    and whether `pool-submit` results should be first-class channels (as
    specified) or an opaque `task` record. Library-level; decide in Phase 5
