@@ -270,6 +270,11 @@ Concretely:
   `rename` to return the name unchanged, matching what `instantiateTemplate`
   already does for `syntax-rules` (rule 3 in its symbol-handling branch) —
   no reason to gensym `if`/`let`/`else`.
+  *(Amended 2026-08-27: wrong for this engine — see
+  [As implemented](#as-implemented-v0220--amended-2026-08-27), Divergence
+  2. The shipped short-circuit set is `reserved_template_forms`
+  (`expander.zig:88`), and `if`/`let` are deliberately gensym'd,
+  kaappi#2074.)*
 
 ### `compare`: mostly a reuse of the literal-matching logic in `matchPattern`
 
@@ -512,9 +517,11 @@ the reasoning survives.
    quadrants the approximation is sufficient; if (iii) fails, that is the
    precise signal that full lexical-environment comparison is required.
    **As implemented (2026-08-27): neither.** Shipped `compare` is
-   hygiene-stripped *name* equality (`expander.zig:530`) — quadrants (i)
-   and the `=>` literal checks pass, but quadrant (ii) still compares true
-   (a use-site local rebinding of the literal matches), and that limit is
+   hygiene-stripped *name* equality (`expander.zig:530`) — the positive
+   detections of quadrant (i) and the `=>` literal checks pass, but the
+   shadowing quadrants still compare true (a use-site local rebinding of
+   the literal matches — (ii)'s `else`, and (iv)'s `=>` analogue alike),
+   and that limit is
    pinned as by-design in the audit suite so a stronger compare shows up
    as a test change. The four-quadrant test was never written. See
    [As implemented](#as-implemented-v0220--amended-2026-08-27), Divergence
@@ -544,7 +551,8 @@ the reasoning survives.
    being true once `er`-macros exist. **As implemented (2026-08-27): the de
    facto behavior is candidate (a)** — resolvable transformer bodies run
    during `kaappi check` — plus placeholder acceptance for specs
-   unresolvable without execution (kaappi#2329, v0.25.0). But the
+   unresolvable without execution (kaappi#2329, first released v0.24.0). But
+   the
    standalone design note this step demanded was never written,
    `docs/dev/check.md` still carries the now-false "without running
    anything" sentence, and no `--sandbox` interaction is documented. Open —
@@ -588,7 +596,8 @@ their real message, issue
 [#1846](https://github.com/kaappi/kaappi/issues/1846)), and
 [#2329](https://github.com/kaappi/kaappi/pull/2329) (`kaappi check` accepts
 unresolvable transformer-specs, issue
-[#2007](https://github.com/kaappi/kaappi/issues/2007); v0.25.0). As-built
+   [#2007](https://github.com/kaappi/kaappi/issues/2007); first released
+   v0.24.0). As-built
 citations are pinned to commit
 [`fb703515`](https://github.com/kaappi/kaappi/commit/fb703515) (main,
 2026-08-27). [KEP-0018](0018-macro-expander-hygiene.md) is the as-built
@@ -673,8 +682,9 @@ section records only what differs from, or was added to, the design above.
    `Transformer` moved to `types_macro.zig`, `renameForHygiene` to
    `expander_instantiate.zig`, `objectSize`/`freeObject` to `gc_sweep.zig`.
    The blast radius is ~28 `src/` files, including `.sbc` serialization of
-   kind + closure (`bytecode_file_read.zig:838`,
-   `bytecode_file_write.zig:605`).
+   kind + closure (read side `bytecode_file_read.zig:838`; written by
+   `writeTransformer` at `bytecode_file_write.zig:753`, kind byte at
+   `:760`).
 6. **Definition-environment resolution was an unforeseen necessity.** Free
    references in a transformer body resolve through the transformer's own
    library (`def_env`/`def_env_val`/`def_lib_name`, the
@@ -682,8 +692,9 @@ section records only what differs from, or was added to, the design above.
    blast-radius estimate omitted.
 7. **GC rooting is `no_collect` windows plus explicit roots, and the
    gc-stress test is missing.** The use path wraps expansion in a
-   no-collection window (`compiler_macro.zig:390`) with `pushRoot` /
-   `extra_roots` discipline inside (`expander.zig:414–456`), rather than
+   no-collection window (`compiler_macro.zig:390`) with `pushRoot`
+   discipline inside (`expander.zig:414–456`) and an `extra_roots` append
+   for the expanded result (`compiler_macro.zig:406`), rather than
    this KEP's "root the entire partially-built form" formulation — and
    Implementation-plan step 1's `-Dgc-stress` exit-criterion test was
    never added. **Open follow-up.**

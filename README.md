@@ -23,7 +23,12 @@ just open a pull request on the relevant repo.
    against this repo. Discussion happens on the PR.
 2. **Accepted** — once there is consensus, the KEP is merged with status
    `Accepted` and implementation can begin (tracked in the target repo).
-3. **Final** — set to `Final` when the implementation has shipped in a release.
+3. **Final** — set to `Final` when the implementation has shipped in a
+   release *and the document has been reconciled with what shipped*. When
+   implementation lands before ratification, the KEP is Accepted
+   retroactively with dated as-built amendments, and stays `Accepted` until
+   the follow-ups those amendments flag are resolved or explicitly tracked
+   in the target repo.
 4. **Rejected / Withdrawn / Superseded** — recorded, not deleted, so the
    reasoning survives.
 
@@ -48,7 +53,7 @@ Withdrawn   Rejected / Superseded
 | [0003](keps/0003-shared-flat-numeric-data.md) | Shared Flat Numeric Data | Draft (gated — evaluated Between, 2026-07-16) | `kaappi` core, `(kaappi parallel)` |
 | [0004](keps/0004-discoverable-deviations.md) | Discoverable Deviations from R7RS-small | Accepted | `kaappi` core, `kaappi.github.io` |
 | [0005](keps/0005-diagnostic-contract.md) | The Diagnostic Contract | Accepted | `kaappi` core, `kaappi.github.io` |
-| [0006](keps/0006-explicit-renaming-macros.md) | Explicit-Renaming Macros (er-macro-transformer) | Accepted (amended 2026-08-27: as implemented in v0.22.0; `compare` and `check`/`--sandbox` follow-ups open) | `kaappi` core |
+| [0006](keps/0006-explicit-renaming-macros.md) | Explicit-Renaming Macros (er-macro-transformer) | Accepted (amended 2026-08-27: as implemented in v0.22.0; `compare`, `check`/`--sandbox`, and gc-stress follow-ups open — see its As-implemented section) | `kaappi` core |
 | [0007](keps/0007-full-syntax-case-support.md) | Full syntax-case Support (Deferred) | Draft (Informational) | `kaappi` core |
 | [0008](keps/0008-shared-ir-contract.md) | A Shared IR Contract for kaappi, paal, and chaaya | Draft | `kaappi` core, `paal`, `chaaya` |
 | [0009](keps/0009-version-library.md) | A `(kaappi version)` Library for SemVer 2.0.0 | Draft | `kaappi` core, `kaappi.github.io` |
