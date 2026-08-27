@@ -48,7 +48,7 @@ Withdrawn   Rejected / Superseded
 | [0003](keps/0003-shared-flat-numeric-data.md) | Shared Flat Numeric Data | Draft (gated — evaluated Between, 2026-07-16) | `kaappi` core, `(kaappi parallel)` |
 | [0004](keps/0004-discoverable-deviations.md) | Discoverable Deviations from R7RS-small | Accepted | `kaappi` core, `kaappi.github.io` |
 | [0005](keps/0005-diagnostic-contract.md) | The Diagnostic Contract | Accepted | `kaappi` core, `kaappi.github.io` |
-| [0006](keps/0006-explicit-renaming-macros.md) | Explicit-Renaming Macros (er-macro-transformer) | Draft | `kaappi` core |
+| [0006](keps/0006-explicit-renaming-macros.md) | Explicit-Renaming Macros (er-macro-transformer) | Accepted (amended 2026-08-27: as implemented in v0.22.0; `compare` and `check`/`--sandbox` follow-ups open) | `kaappi` core |
 | [0007](keps/0007-full-syntax-case-support.md) | Full syntax-case Support (Deferred) | Draft (Informational) | `kaappi` core |
 | [0008](keps/0008-shared-ir-contract.md) | A Shared IR Contract for kaappi, paal, and chaaya | Draft | `kaappi` core, `paal`, `chaaya` |
 | [0009](keps/0009-version-library.md) | A `(kaappi version)` Library for SemVer 2.0.0 | Draft | `kaappi` core, `kaappi.github.io` |
