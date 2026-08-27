@@ -46,7 +46,8 @@ expansion-depth/chain/fixpoint machinery, the special-form boundary and
 
 ### A correction the source forces
 
-KEP-0006 and KEP-0007 (both Draft, 2026-07-21) describe procedural
+KEP-0006 and KEP-0007 (both Draft when this was written, 2026-07-21)
+describe procedural
 transformers as *unbuilt future work* — KEP-0006's "prerequisite" section
 claims `expandMacro` "never calls into the VM" and `types.Transformer` has
 "no 'kind' tag, no procedure-value field." **Both are now false in-tree.**
@@ -57,7 +58,10 @@ calls back into the VM. This shipped as **SRFI 211 in v0.22.0
 (2026-07-30)**, ~8 days after those KEPs merged as Draft — implemented as a
 SRFI library rather than the kaappi-native extension KEP-0006 sketched. This
 KEP describes the expander *as built*, and flags the stale framing so the
-two Draft KEPs can be reconciled.
+two Draft KEPs can be reconciled. *(2026-08-27: KEP-0006's half is
+reconciled — keps#47 amended it to Accepted with an as-implemented record
+citing this KEP as the internal counterpart; KEP-0007 remains Draft by
+design.)*
 
 ## Summary
 
@@ -100,8 +104,10 @@ importance:
   the design and its limits reviewable.
 - **The KEP set currently mis-describes reality.** KEP-0006/0007 froze a
   snapshot in which procedural transformers didn't exist; the code shipped
-  them a week later as SRFI 211. Anyone reading the KEPs today gets a false
-  picture of the expander. An as-built KEP corrects the record and draws the
+  them a week later as SRFI 211. Anyone reading the KEPs as they stood
+  before 2026-08-27 got a false picture of the expander (KEP-0006 has since
+  been amended; KEP-0007 still frames procedural transformers as unbuilt).
+  An as-built KEP corrects the record and draws the
   boundary between "the expander's internal machinery" (here) and "the SRFI
   211 user surface" (KEP-0006's lineage).
 - **A future `syntax-case` needs a precise baseline.** KEP-0007 is
@@ -412,6 +418,10 @@ Documentation only; no behavioural change. Recorded facts:
    those Draft KEPs be updated (or annotated) to reflect that procedural
    transformers now exist as SRFI 211, and should this KEP be listed as the
    internal counterpart they build on?
+   *(Resolved for KEP-0006, 2026-08-27: keps#47. Deferred for KEP-0007 to
+   its own future PR — its revisit trigger is half-met (ER shipped v0.22.0;
+   `compare` diverged to name-based equality, which bears directly on
+   KEP-0007's rename/compare-sufficiency question).)*
 2. **Is the name-string hygiene encoding a permanent representation**, or the
    thing a future `syntax-case` (KEP-0007) must replace with real syntax
    objects? If the latter, should this KEP record the migration path as an
@@ -437,6 +447,8 @@ Retroactive; no code changes. Process and documentation steps:
 2. **Correct the stale record**: update `architecture.md` ("Only
    syntax-rules …") and annotate KEP-0006/0007 that procedural transformers
    shipped as SRFI 211 (v0.22.0), with this KEP as the internal reference.
+   *(2026-08-27: the KEP-0006 annotation landed in keps#47; the KEP-0007
+   annotation and the `architecture.md` update remain pending.)*
 3. **Write the first `docs/dev/expander.md`** (hygiene mechanism, scope
    table, the flag encoding, the depth/chain split) seeded from this KEP's
    reference section, and link it here.

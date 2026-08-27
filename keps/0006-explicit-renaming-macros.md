@@ -5,7 +5,7 @@
 | **KEP** | 0006 |
 | **Title** | Explicit-Renaming Macros (er-macro-transformer) |
 | **Author** | Baiju Muthukadan <baiju.m.mail@gmail.com> |
-| **Status** | Draft |
+| **Status** | Accepted (amended 2026-08-27: [As implemented](#as-implemented-v0220--amended-2026-08-27), shipped v0.22.0) |
 | **Type** | Standards |
 | **Target** | `kaappi` core (`expander.zig`, `compiler_macro.zig`, `types.zig`, `vm_library.zig`, `memory.zig`, `gc_collect.zig`) |
 | **Created** | 2026-07-21 |
@@ -21,7 +21,12 @@ cites as evidence exist and are readable at that single revision. See
 KEP-0007 for the (deferred) full `syntax-case` alternative and the
 R7RS-large research behind choosing not to pursue it now — split out of an
 earlier draft of this KEP because the two proposals have no build-order
-dependency on each other and belong under different `Status` fields.*
+dependency on each other and belong under different `Status` fields.
+Design-level references below stay pinned to `7949e497`; the
+[As implemented](#as-implemented-v0220--amended-2026-08-27) section's
+as-built citations are pinned to commit
+[`fb703515`](https://github.com/kaappi/kaappi/commit/fb703515) (main,
+2026-08-27).*
 
 ## Summary
 
@@ -33,6 +38,11 @@ compare) ...)` — that runs and returns the expansion, instead of a template
 the expander pattern-matches against. This is proposed as a **documented
 Kaappi extension**, not a preview of any future R7RS-large facility — see
 KEP-0007 for why full `syntax-case` is deliberately not this KEP's proposal.
+**Amended 2026-08-27: this shipped in kaappi v0.22.0 (2026-07-30)** as part
+of SRFI 211; the
+[As implemented](#as-implemented-v0220--amended-2026-08-27) section records
+how the built system differs from the design below, and KEP-0018 is the
+as-built architecture record of the expander it builds on.
 
 ## Motivation
 
@@ -260,6 +270,11 @@ Concretely:
   `rename` to return the name unchanged, matching what `instantiateTemplate`
   already does for `syntax-rules` (rule 3 in its symbol-handling branch) —
   no reason to gensym `if`/`let`/`else`.
+  *(Amended 2026-08-27: wrong for this engine — see
+  [As implemented](#as-implemented-v0220--amended-2026-08-27), Divergence
+  2. The shipped short-circuit set is `reserved_template_forms`
+  (`expander.zig:88`), and `if`/`let` are deliberately gensym'd,
+  kaappi#2074.)*
 
 ### `compare`: mostly a reuse of the literal-matching logic in `matchPattern`
 
@@ -326,6 +341,14 @@ collector frees a closure a live macro still references — a use-after-free.
 That is a second, distinct GC hazard on top of the reentrant-execution
 rooting flagged in the prerequisite section above.
 
+*(Amended 2026-08-27: the shipped count is higher — after the kaappi#1853
+file splits and the implementation, roughly 28 `src/` files consume
+`Transformer`. `Transformer` itself now lives in `types_macro.zig`, spec
+recognition in `compiler_define_syntax.zig`, `renameForHygiene` in
+`expander_instantiate.zig`, and `objectSize`/`freeObject` in `gc_sweep.zig`;
+the five GC arms remain the load-bearing obligation and are traced and
+tested. See [As implemented](#as-implemented-v0220--amended-2026-08-27).)*
+
 ### Scope: which transformer kinds
 
 SRFI 211 gives portable names to a whole family of procedural transformers
@@ -350,7 +373,11 @@ from it:
   referencing this KEP — added when a concrete macro wants the nicer
   default, not speculatively. Only if implementing it turned out to need
   core changes beyond what `er` provides would it warrant an *amendment* to
-  this KEP, still not a document of its own.
+  this KEP, still not a document of its own. *(Amended 2026-08-27:
+  rejected — see [As implemented](#as-implemented-v0220--amended-2026-08-27),
+  Divergence 3: a symbol-based expander cannot honestly distinguish
+  injected from macro-generated interned symbols, so
+  `(srfi 211 implicit-renaming)` is documented as not provided.)*
 - **`sc-` / `rsc-macro-transformer` (syntactic closures) — out of scope.**
   These expose first-class *syntactic environments* and
   `make-syntactic-closure`, a different abstraction than `rename`/`compare`,
@@ -489,6 +516,17 @@ the reasoning survives.
    Chibi's full `identifier=?`. If a re-ported `cond` passes all four
    quadrants the approximation is sufficient; if (iii) fails, that is the
    precise signal that full lexical-environment comparison is required.
+   **As implemented (2026-08-27): neither.** Shipped `compare` is
+   hygiene-stripped *name* equality (`expander.zig:530`) — the positive
+   detections of quadrant (i) and the `=>` literal checks pass, but the
+   shadowing quadrants still compare true (a use-site local rebinding of
+   the literal matches — (ii)'s `else`, and (iv)'s `=>` analogue alike),
+   and that limit is
+   pinned as by-design in the audit suite so a stronger compare shows up
+   as a test change. The four-quadrant test was never written. See
+   [As implemented](#as-implemented-v0220--amended-2026-08-27), Divergence
+   1 — this is the sharpest open gap between the shipped system and the
+   SRFI 211 contract this KEP resolved to.
 3. **`kaappi check`/`--sandbox` policy, precisely. — Recommend candidate (a),
    to be ratified before shipping.** The candidates: (a) transformer bodies
    always run under `check`/`--sandbox`, documented as "macro-defining code is
@@ -510,7 +548,16 @@ the reasoning survives.
    stays a security gate to settle by design (Implementation plan, step 2),
    and it forces one documentation fix: `docs/dev/check.md`'s claim that a
    same-file macro use "expands correctly without running anything" stops
-   being true once `er`-macros exist.
+   being true once `er`-macros exist. **As implemented (2026-08-27): the de
+   facto behavior is candidate (a)** — resolvable transformer bodies run
+   during `kaappi check` — plus placeholder acceptance for specs
+   unresolvable without execution (kaappi#2329, first released v0.24.0). But
+   the
+   standalone design note this step demanded was never written,
+   `docs/dev/check.md` still carries the now-false "without running
+   anything" sentence, and no `--sandbox` interaction is documented. Open —
+   see [As implemented](#as-implemented-v0220--amended-2026-08-27),
+   Divergence 8.
 4. **Does Kaappi's own SRFI-porting style actually prefer this once it
    exists?** Inherently empirical — a question about Kaappi's own
    contributors, not answerable from outside. The directional signal from
@@ -519,7 +566,10 @@ the reasoning survives.
    added `ir-macro-transformer` on top of `er` once the primitive existed),
    but Kaappi-specific adoption is only observable after shipping — which is
    exactly what Implementation-plan step 5 (re-port SRFI 241/202) is designed
-   to measure.
+   to measure. **First reading (2026-08-27):** one shipped consumer so far —
+   SRFI 150's `define-record-type` — while 241/202 have not been re-ported;
+   the question stays open. See
+   [As implemented](#as-implemented-v0220--amended-2026-08-27).
 5. **Should the naming (`er-macro-transformer`) match Chibi Scheme's exactly?
    — Resolved: match SRFI 211, which is Chibi's convention.** SRFI 211
    standardizes `er-macro-transformer` with exactly this whole-form +
@@ -532,6 +582,156 @@ the reasoning survives.
    feature test — `(cond-expand ((library (srfi 211 explicit-renaming)) ...))`
    — over a bespoke `kaappi-er-macros` symbol, with a kaappi-native alias
    alongside if wanted.
+
+## As implemented (v0.22.0) — amended 2026-08-27
+
+Core shipped this mechanism on 2026-07-28 — [kaappi#1811](https://github.com/kaappi/kaappi/pull/1811),
+resolving [#1699](https://github.com/kaappi/kaappi/issues/1699) — and
+released it in v0.22.0 (2026-07-30), ahead of this KEP's ratification; this
+amendment accepts it retroactively and records the deltas. Follow-ups:
+[#1824](https://github.com/kaappi/kaappi/pull/1824) (definition-environment
+resolution, issue [#1812](https://github.com/kaappi/kaappi/issues/1812)),
+[#1847](https://github.com/kaappi/kaappi/pull/1847) (transformer errors keep
+their real message, issue
+[#1846](https://github.com/kaappi/kaappi/issues/1846)), and
+[#2329](https://github.com/kaappi/kaappi/pull/2329) (`kaappi check` accepts
+unresolvable transformer-specs, issue
+[#2007](https://github.com/kaappi/kaappi/issues/2007); first released
+v0.24.0). As-built
+citations are pinned to commit
+[`fb703515`](https://github.com/kaappi/kaappi/commit/fb703515) (main,
+2026-08-27). [KEP-0018](0018-macro-expander-hygiene.md) is the as-built
+architecture record of the expander and owns the internal detail; this
+section records only what differs from, or was added to, the design above.
+
+### What shipped as designed
+
+- **The `kind` tag with the closure as a single `Value`** —
+  `TransformerKind = enum { syntax_rules, er_macro, lisp_macro }`
+  (`types_macro.zig:18`) with `proc: Value` (`types_macro.zig:29`), reusing
+  the existing `.transformer` heap tag. No new heap type, no syntax objects,
+  plain data in and out — as promised.
+- **The whole-form `(form rename compare)` convention** (Unresolved
+  question 1's resolution) — `expander.zig:431`; `lisp-transformer` receives
+  just the datum.
+- **Referentially-transparent `rename` as a thin wrapper over existing
+  machinery** — `expandProceduralMacro` (`expander.zig:373`) mints one
+  `freshScope()` per invocation (`:393`) and delegates to
+  `renameForHygiene` + `scope_table` dedup; tested for within-expansion
+  consistency (`src/tests_macros.zig:1787`). The KEP's central
+  "reuse, don't redesign" claim held.
+- **Compile-and-execute of the transformer spec at definition time, VM
+  calls at use time** — via `globals.zig` hooks so the expander never
+  imports the VM: `compiler_define_syntax.zig:608` → `vm.zig:68`
+  (`evalDatumForMacro`) and `vm.zig:94` (`callProcForMacro`).
+- **GC tracing of the closure in all five arms, with a dedicated test** —
+  `gc_collect.zig:167` (barrier), `:690` and `:1044` (marking),
+  `gc_sweep.zig:205`/`:359` (size/free), `gc_alloc.zig:349`
+  (`allocProceduralTransformer`); `src/tests_gc_tracing.zig:356`. The KEP's
+  "easiest thing to forget" was not forgotten.
+- **Transformer failures surface as compile diagnostics carrying the
+  transformer's real message** at the use site — `compiler_macro.zig:26`,
+  tested at `src/tests_macros.zig:1849–1873` (including a `(car 7)` type
+  error inside a transformer body).
+- **`(srfi 211 explicit-renaming)` importable and probeable** via
+  `(cond-expand ((library (srfi 211 explicit-renaming)) ...))` (Unresolved
+  question 5's resolution) — `lib/srfi/211/explicit-renaming.sld`; the
+  siblings `define-macro` and `syntax-parameter` ship as the other two
+  provided sub-libraries, with the remaining eight documented as not
+  provided.
+
+### Divergences
+
+1. **`compare` is name-based, not `free-identifier=?`.** Shipped `compare`
+   (`expander.zig:530`) is hygiene-stripped symbol equality: it answers the
+   classic auxiliary-keyword checks (`else`, `=>`) but cannot distinguish
+   two same-named bindings, so Unresolved question 2's quadrant (ii) — a
+   use-site local rebinding of the literal — still compares true. The limit
+   is self-documented (`lib/srfi/211/explicit-renaming.sld:43`) and pinned
+   in the audit suite
+   (`tests/scheme/audit/primitives_smallbatch-audit.scm:761`) precisely so
+   a stronger compare shows up as a test change; quadrant (iii) is
+   untested, and the four-quadrant acceptance test was never written.
+   **Open follow-up:** implement binding-aware `compare` (the
+   `literal_bound` + `use_check.resolve` reuse sketched above) or ratify
+   the deviation and document it in KEP-0004's discoverable-deviations
+   spirit. Either way the four-quadrant test should land.
+2. **`rename` gensyms `if` and `let`.** The short-circuit set is
+   `reserved_template_forms` (`expander.zig:88`) — `define`, `else`,
+   `quote`, `...` stay bare — which is *smaller* than this KEP's
+   `isWellKnown` suggestion; `if`/`let` are deliberately hygiene-renamed,
+   the compiler recognizing them through effective-name stripping
+   (kaappi#2074). This KEP's "no reason to gensym `if`/`let`" guess was
+   wrong for this engine.
+3. **`ir-macro-transformer` is rejected, not a follow-on.** The Scope
+   section's "cheap library over `er`" plan did not survive implementation:
+   a symbol-based expander cannot honestly distinguish injected from
+   macro-generated symbols when both are the same interned object
+   (`docs/dev/srfi-implementation-notes.md:1422–1429`). The
+   `implicit-renaming` sub-library is documented as not provided.
+4. **Scope grew beyond "one primitive."** Two new transformer kinds shipped
+   beyond `syntax_rules` — `er_macro` and `lisp_macro` (SRFI 211's
+   `define-macro`/`lisp-transformer`) — with SRFI 213's
+   `define-property`/`capture-lookup` riding the same mechanism. One
+   hygiene substrate, as governed, but two more surfaces than this KEP
+   proposed.
+5. **Naming and file layout.** The kind is `.er_macro` (not
+   `.explicit_renaming`); spec recognition lives in
+   `compiler_define_syntax.zig:608` (the file split from
+   `compiler_macro.zig` in kaappi#1853, after this KEP was written);
+   `Transformer` moved to `types_macro.zig`, `renameForHygiene` to
+   `expander_instantiate.zig`, `objectSize`/`freeObject` to `gc_sweep.zig`.
+   The blast radius is ~28 `src/` files, including `.sbc` serialization of
+   kind + closure (read side `bytecode_file_read.zig:838`; written by
+   `writeTransformer` at `bytecode_file_write.zig:753`, kind byte at
+   `:760`).
+6. **Definition-environment resolution was an unforeseen necessity.** Free
+   references in a transformer body resolve through the transformer's own
+   library (`def_env`/`def_env_val`/`def_lib_name`, the
+   `__kaappi_defenv__` name prefix — kaappi#1824), machinery this KEP's
+   blast-radius estimate omitted.
+7. **GC rooting is `no_collect` windows plus explicit roots, and the
+   gc-stress test is missing.** The use path wraps expansion in a
+   no-collection window (`compiler_macro.zig:390`) with `pushRoot`
+   discipline inside (`expander.zig:414–456`) and an `extra_roots` append
+   for the expanded result (`compiler_macro.zig:406`), rather than
+   this KEP's "root the entire partially-built form" formulation — and
+   Implementation-plan step 1's `-Dgc-stress` exit-criterion test was
+   never added. **Open follow-up.**
+8. **The `check`/`--sandbox` policy (Unresolved question 3) is behavior,
+   not ratified design.** De facto it is candidate (a) — resolvable
+   transformer bodies run during `kaappi check` — plus #2329's placeholder
+   acceptance for specs unresolvable without execution. But the standalone
+   design note (Implementation-plan step 2) was never written,
+   `docs/dev/check.md:106–109` still claims a same-file macro use expands
+   "without running anything" (false since v0.22.0), and no `--sandbox`
+   interaction is documented anywhere. **Open follow-up** — this KEP's
+   "settle by design, not by security report" warning stands.
+
+### Remaining work (to be tracked as kaappi core issues)
+
+1. `compare` semantics — binding-aware implementation or ratified
+   deviation, plus the four-quadrant test (Divergence 1).
+2. `docs/dev/check.md` correction and the deferred `check`/`--sandbox`
+   policy note (Divergence 8).
+3. Re-port SRFI 241/202 on `er-macro-transformer` (Implementation-plan
+   step 5): neither file has changed since `7949e497`, every Motivation
+   workaround still stands in `lib/srfi/241.sld`'s header, and
+   `lib/srfi/148.sld:10–14` still asserts Kaappi "has no
+   `er-macro-transformer` support" — now false.
+4. The `-Dgc-stress` rooting test (Divergence 7).
+5. User-facing documentation (step 6's second half): a kaappi.github.io
+   page stating plainly that this is beyond R7RS-small and is *not*
+   `syntax-case`, plus a row in the conformance guide's extensions table.
+
+### Adoption signal (Unresolved question 4, first reading)
+
+One shipped consumer so far: SRFI 150's `define-record-type` is an
+`er-macro-transformer` (`lib/srfi/150.sld:319`) — hygienic field-name
+matching needs SRFI 213's `lookup`, reachable only from a procedural
+transformer. SRFI 148 deliberately stays on the reference's portable
+branch, and the motivating 241/202 re-ports have not happened. Too early
+to call; the question stays open.
 
 ## Implementation plan
 
@@ -548,9 +748,18 @@ question 3) is settled by design before it can be a security incident.
    transformer that raises. Exit criterion: a hand-written test in
    `tests_macros.zig` that defines a "transformer" this way and confirms
    rooting survives a forced GC (`-Dgc-stress=true`) during the call.
+   *(2026-08-27: shipped in production form in v0.22.0 — `vm.zig` hooks
+   plus `no_collect`/root discipline — except the `-Dgc-stress`
+   exit-criterion test, still open; see
+   [As implemented](#as-implemented-v0220--amended-2026-08-27), Divergence
+   7.)*
 2. **Resolve Unresolved question 3** (the `check`/`--sandbox` policy) as a
    short, standalone design note before writing user-facing macro syntax —
    this is the one item with security consequences if skipped.
+   *(2026-08-27: not done — the de facto policy exists in code but the
+   note and the `check.md` correction don't; open, see
+   [As implemented](#as-implemented-v0220--amended-2026-08-27), Divergence
+   8.)*
 3. **`types.Transformer` gains its `kind` tag**; audit and update every
    call site across the nine files listed in Reference-level design to
    handle both kinds, with the `.syntax_rules` path byte-for-byte unchanged
@@ -558,9 +767,16 @@ question 3) is settled by design before it can be a security incident.
    with zero modifications. Include `gc_collect.zig`'s marking arms in this
    audit: tracing the new closure `Value` is a correctness requirement, not
    optional cleanup, and is the easiest thing to forget.
+   *(2026-08-27: done in v0.22.0 — the audit is now ~28 files after the
+   kaappi#1853 splits, and the tracing test landed
+   (`src/tests_gc_tracing.zig:356`).)*
 4. **`er-macro-transformer` special form + `rename`/`compare`
    implementation**, reusing `renameForHygiene` and the literal-matching
    logic identified in Reference-level design rather than rebuilding either.
+   *(2026-08-27: done in v0.22.0 — `rename` as envisioned; `compare`
+   diverged to name-based equality, see
+   [As implemented](#as-implemented-v0220--amended-2026-08-27), Divergence
+   1.)*
 5. **Re-port SRFI 241 and/or SRFI 202** on top of this as the acceptance
    test for the whole feature — if the ellipsis-aware quasiquote, compound
    ellipsis sub-patterns, and mixed vector prefix/suffix limitations
@@ -568,6 +784,8 @@ question 3) is settled by design before it can be a security incident.
    concrete, falsifiable signal that this delivered what the KEP set out to
    fix. If they can't be lifted cleanly, that is equally valuable signal
    that the design needs another iteration before wider use.
+   *(2026-08-27: not done — neither file has changed since `7949e497`;
+   open.)*
 6. **Document as a Kaappi extension**, in the same spirit as KEP-0004: expose
    `er-macro-transformer` under the SRFI 211 library
    `(srfi 211 explicit-renaming)` so portable code can feature-test it with
@@ -575,6 +793,8 @@ question 3) is settled by design before it can be a security incident.
    kaappi-native alias/feature may sit alongside), and a kaappi-lang.org page
    stating plainly that this is beyond R7RS-small and is *not* R7RS-large's
    eventual `syntax-case` (see KEP-0007).
+   *(2026-08-27: half done — the SRFI 211 library exposure shipped; the
+   website page and conformance-guide row are open.)*
 
 ## Sources
 
