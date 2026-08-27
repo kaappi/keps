@@ -708,19 +708,25 @@ section records only what differs from, or was added to, the design above.
    interaction is documented anywhere. **Open follow-up** — this KEP's
    "settle by design, not by security report" warning stands.
 
-### Remaining work (to be tracked as kaappi core issues)
+### Remaining work (tracked as kaappi core issues, filed 2026-08-27)
 
-1. `compare` semantics — binding-aware implementation or ratified
-   deviation, plus the four-quadrant test (Divergence 1).
-2. `docs/dev/check.md` correction and the deferred `check`/`--sandbox`
+1. [#2388](https://github.com/kaappi/kaappi/issues/2388) — `compare`
+   semantics: binding-aware implementation or ratified deviation, plus the
+   four-quadrant test (Divergence 1). Decision informed by #2391's re-port
+   evidence.
+2. [#2389](https://github.com/kaappi/kaappi/issues/2389) —
+   `docs/dev/check.md` correction and the deferred `check`/`--sandbox`
    policy note (Divergence 8).
-3. Re-port SRFI 241/202 on `er-macro-transformer` (Implementation-plan
-   step 5): neither file has changed since `7949e497`, every Motivation
+3. [#2391](https://github.com/kaappi/kaappi/issues/2391) — Re-port SRFI
+   241/202 on `er-macro-transformer` (Implementation-plan step 5): neither
+   file has changed since `7949e497`, every Motivation
    workaround still stands in `lib/srfi/241.sld`'s header, and
    `lib/srfi/148.sld:10–14` still asserts Kaappi "has no
    `er-macro-transformer` support" — now false.
-4. The `-Dgc-stress` rooting test (Divergence 7).
-5. User-facing documentation (step 6's second half): a kaappi.github.io
+4. [#2390](https://github.com/kaappi/kaappi/issues/2390) — The
+   `-Dgc-stress` rooting test (Divergence 7).
+5. [#2392](https://github.com/kaappi/kaappi/issues/2392) — User-facing
+   documentation (step 6's second half): a kaappi.github.io
    page stating plainly that this is beyond R7RS-small and is *not*
    `syntax-case`, plus a row in the conformance guide's extensions table.
 
