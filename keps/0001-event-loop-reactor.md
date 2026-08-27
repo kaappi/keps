@@ -5,7 +5,7 @@
 | **KEP** | 0001 |
 | **Title** | Event-Loop Reactor for Fiber I/O |
 | **Author** | Baiju Muthukadan <baiju.m.mail@gmail.com> |
-| **Status** | Final |
+| **Status** | Final (amended 2026-08-27: [As implemented](#as-implemented-v0150--amended-2026-08-27), shipped v0.15.0) |
 | **Type** | Standards |
 | **Target** | `kaappi` core (VM/scheduler/I/O), with downstream effects on `kaappi-net`, `kaappi-http`, `kaappi-pg` |
 | **Created** | 2026-06-29 |
@@ -16,6 +16,11 @@
 [`488eaed2`](https://github.com/kaappi/kaappi/commit/488eaed2) (v0.14.1,
 2026-07-11) and were verified against that source. Zig standard-library claims
 were verified against Zig 0.16.0.*
+
+*Amended 2026-08-27: the design below shipped in kaappi v0.15.0; the
+[As implemented](#as-implemented-v0150--amended-2026-08-27) section records the
+release, the phase-by-phase PR trail, the Phase 7 measurement outcomes, and the
+divergences found while measuring.*
 
 ## Summary
 
@@ -287,7 +292,9 @@ than kqueue/epoll, it has no WASI backend (`Io.Evented = void` there —
 verified in `std/Io.zig`), and it imposes its own fiber/Operation model that
 collides with Kaappi's `Fiber`/`FiberScheduler`. We may, however, use
 `std/Io/Kqueue.zig` (the BSD backend) as a reference for the wakeup-pipe
-(`EVFILT.USER`) pattern if cross-thread wakeup is added later.
+(`EVFILT.USER`) pattern if cross-thread wakeup is added later. *(It later was:
+KEP-0002 shipped an `EVFILT.USER`/`eventfd` notifier per reactor — see the
+amendment to resolved question 4 below.)*
 
 ### 3. Scheduler integration
 
@@ -470,7 +477,10 @@ server) work **unchanged** once the port layer is reactor-aware.
   Mitigated by shipping level-triggered/ONESHOT first.
 - **TLS and pg lag.** The most-used secure paths (HTTPS, Postgres) do not
   benefit until their separate rework lands, so "fibers for I/O" is only fully
-  true for plain TCP at first.
+  true for plain TCP at first. *(Amended 2026-08-27: both landed — reactor-aware
+  TLS ([kaappi-net#3](https://github.com/kaappi/kaappi-net/pull/3)) and the
+  async-libpq rewrite ([kaappi-pg#1](https://github.com/kaappi/kaappi-pg/pull/1));
+  see [As implemented](#as-implemented-v0150--amended-2026-08-27).)*
 - **Fiber footprint.** Lifting `MAX_FIBERS` exposes the per-fiber
   preallocation cost (§3); the live-window sizing direction (resolved
   question 5) addresses it, pending Phase 7 measurement.
@@ -518,7 +528,11 @@ server) work **unchanged** once the port layer is reactor-aware.
 
 All five questions in the accepted draft were resolved on 2026-07-11. The
 decisions are recorded here and folded into the design sections above; the
-only remaining open item is a measurement, owned by Phase 7.
+only remaining open item is a measurement, owned by Phase 7. *(Amended
+2026-08-27: Phase 7 ran — Q1/Q2/Q3 confirmed, edge-triggered migration a
+no-go, Q5 memory confirmed while Q5 switch time exposed an O(n) scheduler scan
+since fixed; the native-frame fallback half of Q5 remains inconclusive. See
+[As implemented](#as-implemented-v0150--amended-2026-08-27).)*
 
 1. **Two fibers blocked on one fd — resolved: multiple waiters, wake-all.**
    `Reg` holds a (usually length-one) waiter list per direction; readiness
@@ -556,7 +570,15 @@ only remaining open item is a measurement, owned by Phase 7.
    unregister-before-close in `close-port` with waiter wakeup (§4), plus a
    debug-build assertion that `register()` never finds a stale registration.
    **Revisit trigger:** adding cross-thread wakeup (`EVFILT.USER`, §2) would
-   reintroduce the concurrency and force token indirection.
+   reintroduce the concurrency and force token indirection. *(Amended
+   2026-08-27: KEP-0002 §5 later added exactly that — an `EVFILT.USER`
+   (kqueue) / `eventfd` (epoll) notifier on every reactor. The "force token
+   indirection" half of the prediction did not hold: the notifier carries no
+   payload across threads (no fd, no fiber pointer), all cross-thread channel
+   state lives under the `SharedChannel` mutex, and fiber statuses are still
+   flipped only by the owning thread — so the recycle race remains impossible
+   without token indirection. See KEP-0002 §5, "Why this stays safe against
+   KEP-0001's fd-reuse analysis".)*
 5. **Per-fiber memory sizing — direction resolved: live-window
    save/restore; magnitude to measure.** Shrinking initial capacities alone
    cannot help while `saveCurrentFiber` copies `vm.registers.len` on every
@@ -615,3 +637,111 @@ threaded/prefork servers. Measure the residuals of the resolved questions:
 per-fiber RSS and switch time after the live-window change at realistic
 connection counts (Q5), ONESHOT re-arm cost in profiles (Q3), wake-all herd
 cost on shared fds (Q1), and whether any workload motivates `timerfd` (Q2).
+*(Ran in the v0.15.0 timeframe: no-go on edge-triggered — see
+[As implemented](#as-implemented-v0150--amended-2026-08-27).)*
+
+## As implemented (v0.15.0) — amended 2026-08-27
+
+The reactor shipped in **kaappi v0.15.0** (tagged 2026-07-16). Phases 1–4 and
+7 merged 2026-07-11/12 under tracking issue
+[#1445](https://github.com/kaappi/kaappi/issues/1445) (epic
+[#1438](https://github.com/kaappi/kaappi/issues/1438)); this KEP was marked
+Final on 2026-07-13, three days before the release tag, and this section is
+the reconciliation with what shipped that the Final status requires.
+
+| Phase | PR | What landed |
+|-------|----|-------------|
+| 1 | [#1446](https://github.com/kaappi/kaappi/pull/1446) | Reactor core: kqueue/epoll backends, userspace timer heap |
+| 2 | [#1453](https://github.com/kaappi/kaappi/pull/1453) | Scheduler integration: `io_waiting`, `runSchedulerStep`, reactor park |
+| 3 | [#1459](https://github.com/kaappi/kaappi/pull/1459) | Port layer: non-blocking reads/writes, write buffering, `(read)` EAGAIN path |
+| 4 | [#1461](https://github.com/kaappi/kaappi/pull/1461) | WASI backend: `poll_oneoff` reactor |
+| 7 | [#1476](https://github.com/kaappi/kaappi/pull/1476) | Benchmarks, edge-triggered go/no-go, `thread-sleep!` stack-growth fix (#1463) |
+
+The ecosystem phases followed in the downstream repos: `http-listen-fiber`
+([kaappi-http#1](https://github.com/kaappi/kaappi-http/pull/1)), reactor-aware
+TLS — `SSL_ERROR_WANT_READ`/`WANT_WRITE` surfaced as −2/−3 would-block
+sentinels ([kaappi-net#3](https://github.com/kaappi/kaappi-net/pull/3)) — and
+`kaappi-pg` rewritten onto libpq's async API
+([kaappi-pg#1](https://github.com/kaappi/kaappi-pg/pull/1)).
+
+### What shipped as designed
+
+The §1 `Reactor` interface (fd-keyed registration, per-direction waiter lists,
+userspace timer heap), the §3 `io_waiting` state and
+`io_fd`/`io_interest`/`io_buffer` fields, the §4 hooks (single `readOneByte`
+choke point, resumable port writes split from `reporting.zig`, the incremental
+`(read)` EAGAIN path, unregister-before-close with waiter wakeup), and the §5
+GC roots all landed as specified, as did every resolved decision: ONESHOT
+(Q3), ms-ceil timers with no `timerfd` (Q2), wake-all (Q1), fd-keyed
+registration (Q4). `MAX_FIBERS` and its fixed 64-slot table are gone, and
+`set-nonblocking`/`poll-read`/`nb-accept` remain exported from `kaappi-net`
+for compatibility, as promised.
+
+### Phase 7 outcomes (the measurement this KEP deferred)
+
+Data and methodology live in kaappi's
+[`docs/dev/kep-0001-phase7-benchmarks.md`](https://github.com/kaappi/kaappi/blob/main/docs/dev/kep-0001-phase7-benchmarks.md)
+(benches: `src/bench_reactor.zig`, `src/bench_fibers.zig`).
+
+- **Q1 confirmed.** `poll()`'s wake-all fan-out is a small fixed per-call cost
+  (~2–4 µs at 1,000 waiters on both backends), not per-waiter; the
+  wake-head-only fallback stays unbuilt.
+- **Q2 confirmed.** No sub-ms `thread-sleep!` consumers exist in the
+  ecosystem, and even kqueue's nanosecond API showed a ~1 ms practical floor
+  from thread wake-up latency, so epoll's ms granularity costs nothing real.
+  `timerfd` stays unbuilt.
+- **Q3 confirmed → edge-triggered is a no-go.** ONESHOT re-arm is *cheaper*
+  than the adjacent I/O syscall (0.77× on kqueue, 0.49× on epoll), so there is
+  no overhead left for `EPOLLET`/`EV_CLEAR` to remove. Revisit only if
+  production profiling ever shows re-arm cost dominating.
+- **Q5 partially confirmed.** Per-fiber memory is bounded and modest (RSS
+  high-water deltas ≈0–0.03 MB through 1,000 live fibers, +0.09 MB at 10,000),
+  but switch time degraded ~two orders of magnitude from 100 to 10,000 live
+  fibers (~0.4 µs → ~18–99 µs): `schedule()`/`addFiber()` scanned every fiber
+  slot on each dispatch and spawn. Follow-up
+  [#1477](https://github.com/kaappi/kaappi/issues/1477) made both O(1) — a
+  ready ring + free-slot list ([#1525](https://github.com/kaappi/kaappi/pull/1525)),
+  then a by-object waiter index for wakes
+  ([#1530](https://github.com/kaappi/kaappi/issues/1530) /
+  [#1553](https://github.com/kaappi/kaappi/pull/1553)). Whether the
+  256-register native-frame `frameWindow()` fallback inflates footprints in
+  practice remains **inconclusive** — the one Q5 residual still open.
+
+### Divergences found while measuring
+
+- **The first `http-listen-fiber` was not actually reactor-driven.** Its
+  `fiber-recv`/`fiber-send` polled the fd once and fell back to
+  `(thread-sleep! 0.001)` — a fixed 1 ms poll-then-sleep loop that never
+  reached `Reactor.register`, costing ~1 ms per request (747 req/s vs the
+  sequential server's 3,329 at concurrency 1). Follow-up
+  [#1478](https://github.com/kaappi/kaappi/issues/1478) wired raw fds in
+  properly: core `fd->port` wraps a raw fd as a reactor-integrated port
+  ([#1527](https://github.com/kaappi/kaappi/pull/1527)), `kaappi-net` exposes
+  it as `socket-port`
+  ([kaappi-net#5](https://github.com/kaappi/kaappi-net/pull/5)), and
+  `kaappi-http` adopted it
+  ([kaappi-http#6](https://github.com/kaappi/kaappi-http/pull/6)) — moving
+  `accept` to a dedicated OS thread after adoption uncovered a pre-existing
+  starvation bug (a blocking read inside `handle-client`'s `guard` drove the
+  scheduler and starved the accept loop). Concurrency-1 throughput is now at
+  parity with the sequential server.
+- **`thread-sleep!` grew the native stack without bound** when concurrent
+  fibers each retried through it — every retry nested one more scheduler
+  drive. Found and fixed as a prerequisite to benchmarking (#1463, folded into
+  the Phase 7 PR), with a regression test confirmed to segfault without the
+  fix. A narrower variant (a blocking call nested inside a re-entrant native
+  frame) remains documented beside the #1184 limitation.
+- **`http-listen-threaded` hung on every request** in the benchmark
+  environment — pre-existing and unrelated to the reactor: a closure's
+  `lib_env` was dropped when deep-copying it across threads. Filed as
+  [#1479](https://github.com/kaappi/kaappi/issues/1479), fixed in
+  [#1526](https://github.com/kaappi/kaappi/pull/1526) with a regression test
+  in [#1559](https://github.com/kaappi/kaappi/pull/1559).
+
+### Later evolution (design unchanged)
+
+`runSchedulerStep` and the wait machinery were later split from `fiber.zig`
+into `fiber_wait.zig` under the 1500-line policy
+([#2189](https://github.com/kaappi/kaappi/pull/2189)), gaining comptime-typed
+wait contexts. KEP-0002 built the cross-thread notifier (resolved question 4's
+amendment above) and multi-core fiber scheduling on top of this reactor.
