@@ -596,8 +596,8 @@ their real message, issue
 [#1846](https://github.com/kaappi/kaappi/issues/1846)), and
 [#2329](https://github.com/kaappi/kaappi/pull/2329) (`kaappi check` accepts
 unresolvable transformer-specs, issue
-   [#2007](https://github.com/kaappi/kaappi/issues/2007); first released
-   v0.24.0). As-built
+[#2007](https://github.com/kaappi/kaappi/issues/2007); first released
+v0.24.0). As-built
 citations are pinned to commit
 [`fb703515`](https://github.com/kaappi/kaappi/commit/fb703515) (main,
 2026-08-27). [KEP-0018](0018-macro-expander-hygiene.md) is the as-built
