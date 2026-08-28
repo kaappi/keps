@@ -5,7 +5,7 @@
 | **KEP** | 0004 |
 | **Title** | Discoverable Deviations from R7RS-small |
 | **Author** | Baiju Muthukadan <baiju.m.mail@gmail.com> |
-| **Status** | Accepted |
+| **Status** | Accepted (amended 2026-08-28: Phase 2 shipped — `kaappi-shared-channels` landed, see Implementation plan) |
 | **Type** | Standards |
 | **Target** | `kaappi` core (compiler, VM library loader), `kaappi.github.io` (new conformance page) |
 | **Created** | 2026-07-13 |
@@ -340,6 +340,11 @@ is, by KEP-0002's own admission, still finding correctness bugs in review.
    toward Phase 3 merge — cross-thread send/receive is safe and complete at
    that point; later phases (`(kaappi parallel)`, multi-core HTTP) are
    ecosystem-library work built on top, not core-subsystem safety.
+   *(Resolved 2026-08-28: neither extreme, in the end — the gate the
+   Implementation plan's Phase 2 stated all along, "Phase 3 on `main` with
+   its review findings resolved", is what actually governed. It cleared
+   when kaappi#1487/#1489 closed on 2026-07-13/14; the identifier landed
+   2026-08-28. See Phase 2 below.)*
 3. **Runtime-variance companions**: sandbox thread-blocking and WASI
    reactor degradation are real but fundamentally unexpressible by
    `cond-expand`. Worth a paired runtime predicate (`(kaappi-threads-
@@ -375,22 +380,27 @@ threads` omitted on `wasi`). Verified against a built binary and via
 `features-consistency.scm` (#1177), extended with the three new
 identifiers for Scheme-level parity with the Zig-side tests.
 
-**Phase 2 — `kaappi-shared-channels`. Still blocked, correctly.** Gated on
-KEP-0002's cross-thread wakeup (Phase 3) landing on `main` with its review
-findings resolved. Phase 3 itself shipped
+**Phase 2 — `kaappi-shared-channels`. Shipped (amended 2026-08-28).**
+Gated on KEP-0002's cross-thread wakeup (Phase 3) landing on `main` with
+its review findings resolved. Phase 3 itself shipped
 ([kaappi#1485](https://github.com/kaappi/kaappi/pull/1485),
-[#1486](https://github.com/kaappi/kaappi/pull/1486)), but "review findings
-resolved" is not yet true: two bugs opened against the exact mechanism this
-identifier would advertise are still open —
+[#1486](https://github.com/kaappi/kaappi/pull/1486)); the two review
+findings this phase was blocked on —
 [kaappi#1487](https://github.com/kaappi/kaappi/issues/1487) (a dirty-
 snapshot dispatch hazard in `mutex-lock!`/`condition-variable-wait!`/
-`thread-sleep!`) and, more directly on point,
-[kaappi#1489](https://github.com/kaappi/kaappi/issues/1489) (a **permanent
-hang**: a local sibling send+receive during the `SharedChannelPoll` drive
-can disarm the notifier registration before park). This is precisely the
-gating scenario Motivation described in the abstract (the earlier
-unmerged-wakeup SIGABRT risk); #1489 is its concrete successor. Phase 2
-does not start until both are closed.
+`thread-sleep!`) and [kaappi#1489](https://github.com/kaappi/kaappi/issues/1489)
+(a **permanent hang**: a local sibling send+receive during the
+`SharedChannelPoll` drive could disarm the notifier registration before
+park) — closed 2026-07-13/14, fixed in v0.15.0, and KEP-0002 as a whole
+shipped in v0.15.0/v0.16.0 (see its 2026-08-27 as-implemented amendment).
+The gate had therefore been clear for six weeks before the identifier
+itself landed on kaappi `main` on 2026-08-28: added to
+`types.platform_features` on the same non-wasm branch as `kaappi-threads`
+(promotion requires OS threads; on wasm32-wasi `notify` is a no-op nothing
+calls, KEP-0002 §5), with Zig-side `cond-expand` tests and the
+`features-consistency.scm` (#1177) parity test extended to cover it, and
+the conformance page's "Cross-thread channels" row updated to point at the
+identifier instead of at this gate.
 
 **Phase 3 — `kaappi-shared-buffers`.** Gated on KEP-0003 reaching Accepted
 and shipping its own Phase 1. KEP-0003 is unchanged (Draft, skeleton, no
