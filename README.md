@@ -49,7 +49,7 @@ Withdrawn   Rejected / Superseded
 | KEP | Title | Status | Target |
 |----:|-------|--------|--------|
 | [0001](keps/0001-event-loop-reactor.md) | Event-Loop Reactor for Fiber I/O | Final (amended 2026-08-27: as implemented in v0.15.0; Q5 native-frame residual open — see its As-implemented section) | `kaappi` core |
-| [0002](keps/0002-cross-thread-channels.md) | Cross-Thread Channels and Multi-Core Fiber Scheduling | Accepted (amended 2026-07-16: §6 capacity-0 rendezvous; amended 2026-08-27: as-implemented reconciliation — channel-identity divergence kaappi#2394 and join-notify kaappi#2395 open) | `kaappi` core, `(kaappi parallel)` |
+| [0002](keps/0002-cross-thread-channels.md) | Cross-Thread Channels and Multi-Core Fiber Scheduling | Final (amended 2026-07-16: §6 capacity-0 rendezvous; amended 2026-08-27: as-implemented reconciliation; amended 2026-08-28: channel identity resolved as comparators, kaappi#2394 closed by kaappi#2397 — join-notify kaappi#2395 tracked, see its As-implemented section) | `kaappi` core, `(kaappi parallel)` |
 | [0003](keps/0003-shared-flat-numeric-data.md) | Shared Flat Numeric Data | Draft (gated — evaluated Between, 2026-07-16) | `kaappi` core, `(kaappi parallel)` |
 | [0004](keps/0004-discoverable-deviations.md) | Discoverable Deviations from R7RS-small | Accepted | `kaappi` core, `kaappi.github.io` |
 | [0005](keps/0005-diagnostic-contract.md) | The Diagnostic Contract | Accepted | `kaappi` core, `kaappi.github.io` |
