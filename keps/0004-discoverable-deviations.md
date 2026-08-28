@@ -5,7 +5,7 @@
 | **KEP** | 0004 |
 | **Title** | Discoverable Deviations from R7RS-small |
 | **Author** | Baiju Muthukadan <baiju.m.mail@gmail.com> |
-| **Status** | Accepted (amended 2026-08-28: Phase 2 gate cleared but identifier unshipped — see Implementation plan; UQ1/UQ2 resolved) |
+| **Status** | Accepted (amended 2026-08-28: Phase 2 gate cleared but identifier unshipped — see Implementation plan; naming and ship-gate questions resolved) |
 | **Type** | Standards |
 | **Target** | `kaappi` core (compiler, VM library loader), `kaappi.github.io` (new conformance page) |
 | **Created** | 2026-07-13 |
@@ -22,8 +22,8 @@ the Motivation directly. Doc-site references are pinned against the
 *Amended 2026-08-28: implementation-plan statuses re-verified against kaappi
 `main` at [`5e1680f2`](https://github.com/kaappi/kaappi/commit/5e1680f2)
 (2026-08-28, post v0.25.0). The design sections below are unchanged and stay
-pinned to `55ccff0b`; the Implementation plan, Unresolved questions 1–2, and
-one Alternatives note carry dated updates.*
+pinned to `55ccff0b`; the Summary, the Implementation plan, Unresolved
+questions 1–2, and one Alternatives note carry dated updates.*
 
 ## Summary
 
@@ -32,10 +32,10 @@ process itself (this repository) exists precisely to add things R7RS-small
 has no opinion on: fibers and an I/O reactor (KEP-0001, shipped), cross-thread
 channels (KEP-0002, partially shipped at this KEP's writing; fully shipped
 since — v0.15.0/v0.16.0, per its 2026-08-27 as-implemented amendment), and
-eventually shared mutable buffers (KEP-0003, drafted). None of this is currently **discoverable** by a Scheme
-program or a Scheme programmer without reading Zig source or this KEP
-repository. This proposal adds two independent, complementary surfaces for
-exactly that:
+eventually shared mutable buffers (KEP-0003, drafted). None of this is
+currently **discoverable** by a Scheme program or a Scheme programmer
+without reading Zig source or this KEP repository. This proposal adds two
+independent, complementary surfaces for exactly that:
 
 1. **A code-level surface** — `cond-expand` (SRFI 0) feature identifiers for
    the KEP subsystems, so portable library code can branch on what a given
@@ -346,19 +346,21 @@ is, by KEP-0002's own admission, still finding correctness bugs in review.
    any future officially standardized concurrency feature name; this KEP's
    table above assumes prefixed but the choice is genuinely open.
    **Resolved 2026-08-28: prefixed.** Phase 1 shipped the `kaappi-*` forms
-   (kaappi#1488) and KEP-0005 independently followed the convention with
-   `kaappi-diagnostics`, so the prefixed namespace is now established
-   practice, not an open choice.
+   ([kaappi#1488](https://github.com/kaappi/kaappi/pull/1488)) and KEP-0005
+   independently followed the convention with `kaappi-diagnostics`, so the
+   prefixed namespace is now established practice, not an open choice.
 2. **`kaappi-shared-channels` ship gate**: the moment KEP-0002 Phase 3
    merges to `main`, or only once the full KEP reaches Final? Leaning
    toward Phase 3 merge — cross-thread send/receive is safe and complete at
    that point; later phases (`(kaappi parallel)`, multi-core HTTP) are
    ecosystem-library work built on top, not core-subsystem safety.
    **Resolved by events, 2026-08-28.** Phase 3 merged 2026-07-13 with its
-   review findings (#1487/#1489) closed by 2026-07-14, and KEP-0002 has
-   since shipped every phase (v0.15.0/v0.16.0) — both candidate gates have
-   passed, so the distinction no longer selects different behavior. The
-   remaining work is doing Phase 2, not deciding when it may start.
+   review findings
+   ([#1487](https://github.com/kaappi/kaappi/issues/1487)/[#1489](https://github.com/kaappi/kaappi/issues/1489))
+   closed by 2026-07-14, and KEP-0002 has since shipped every phase
+   (v0.15.0/v0.16.0) — both candidate gates have passed, so the distinction
+   no longer selects different behavior. The remaining work is doing
+   Phase 2, not deciding when it may start.
 3. **Runtime-variance companions**: sandbox thread-blocking and WASI
    reactor degradation are real but fundamentally unexpressible by
    `cond-expand`. Worth a paired runtime predicate (`(kaappi-threads-
@@ -416,9 +418,9 @@ closed 2026-08-28 via [kaappi#2397](https://github.com/kaappi/kaappi/pull/2397).
 
 Despite all that, the identifier itself has never landed:
 `types.platform_features` on kaappi `main` (`5e1680f2`, 2026-08-28) carries
-`kaappi-fibers`,
-`kaappi-reactor`, `kaappi-threads`, and KEP-0005's `kaappi-diagnostics`, but
-no `kaappi-shared-channels` — and no commit on any branch has ever added it.
+`kaappi-fibers`, `kaappi-reactor`, `kaappi-threads`, and KEP-0005's
+`kaappi-diagnostics`, but no `kaappi-shared-channels` — and no commit on
+any branch has ever added it.
 The Phase 4 docs page already states this honestly ("the fixes have shipped,
 the identifier has not yet"), so the docs surface is current; the code
 surface is the gap. Phase 2 is unblocked and actionable.
