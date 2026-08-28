@@ -237,9 +237,16 @@ pub const Process = struct {
     pgid: i32,
     /// Fibers parked in process-wait, woken on exit.
     waiters: WaiterList,
-    owner: u64,   // same cross-heap defense as ports/channels
 };
 ```
+
+Cross-heap defense uses the header-level `Object.owner: u32` field
+(`src/types.zig:225`) that every heap object already carries — no per-type
+field. The `(kaappi process)` primitives check `owner` against the current
+heap the way `channel-send` does (`src/primitives_fiber.zig`); channels and
+SRFI-18 thread handles are the two existing precedents for this
+globals-route check (ports deliberately are *not* owner-checked — #1937
+made that a per-type decision, and Process takes the channel side).
 
 The three port fields are Values and must be traversed by
 `markObjectContents`/`markValueInner`/`referencesYoung`; storing a port into
@@ -247,10 +254,9 @@ a promoted Process needs the write barrier (they are stored once, at
 spawn, while the Process is young — the promotion scan covers it, but the
 barrier is added anyway per the gc-safety rule "when in doubt").
 
-`gc_deep_copy.zig`'s refusal list grows from 14 to 15 tags: a Process is
+`gc_deep_copy.zig`'s refusal list grows from 11 to 12 tags: a Process is
 thread-affine (its waiters and wait registration belong to one scheduler)
-and must not cross a channel. The globals route gets the same `owner`
-defense as ports.
+and must not cross a channel.
 
 ### Spawning
 
@@ -269,14 +275,22 @@ specs, `src/primitives_filesystem.zig:208`).
     it closes everything not explicitly duplicated regardless of audit
     gaps. Linux relies on the CLOEXEC audit (glibc's `addclosefrom_np`
     needs 2.34+ and musl lacks it; the audit is the portable answer).
-- **Windows:** `CreateProcess` with explicit `STARTUPINFO` handle lists,
-  `CREATE_NEW_PROCESS_GROUP` for `new-group:`. The argv list is joined
-  with the documented `CommandLineToArgvW` quoting rules (the same
-  problem `src/thottam_proc.zig` already handles for git on Windows).
-- **WASI:** not registered; `(kaappi process)` is absent and the
-  `kaappi-process` cond-expand feature (below) is not advertised —
-  mirroring how `.wasm = false` primitives disappear today
-  (`src/primitives.zig:217`).
+- **Windows:** `CreateProcess` with explicit `STARTUPINFO` handle lists.
+  The argv list is joined with the documented `CommandLineToArgvW`
+  quoting rules (the same problem `src/thottam_proc.zig` already handles
+  for git on Windows). `new-group:` assigns the child to a fresh **Job
+  Object** at spawn (`CreateJobObject` + `AssignProcessToJobObject`,
+  before the primary thread is resumed) — `TerminateProcess` kills
+  exactly one process and `CREATE_NEW_PROCESS_GROUP` only affects
+  console Ctrl+C routing, so the Job Object is the only mechanism that
+  makes `group:` kill actually reach grandchildren (Node's
+  `child_process` ships without one and its single-process tree-kill is
+  a famous footgun; runtimes that get this right use
+  `TerminateJobObject`).
+- **WASI:** not registered; `(kaappi process)` is absent, so the
+  `(cond-expand ((library (kaappi process)) …))` gate (below) takes the
+  `else` branch — mirroring how `.wasm = false` primitives disappear
+  today (`src/primitives.zig:217`).
 
 Pipe creation: `pipe2(O_CLOEXEC)` / `CreatePipe`; the child's ends are made
 inheritable only inside the file-actions/handle-list, the parent's ends are
@@ -284,6 +298,19 @@ wrapped via the existing fd→port path (the internals of `fdToPort`,
 `src/primitives_io.zig:868`, refactored so the primitive and spawn share
 one constructor). Parent pipe ends get `O_NONBLOCK` lazily exactly as fd
 ports do today (`src/types_port.zig:57`); the child's ends stay blocking.
+
+**SIGPIPE / EPIPE contract.** The canonical subprocess failure is writing
+to the stdin of a child that has already exited. The user-visible contract:
+such a write raises the same I/O-error condition family as any failed port
+write (KEP-0005 taxonomy), carrying `EPIPE` — it is an ordinary catchable
+error, never process death. That requires `SIGPIPE` to be ignored
+process-wide. Today nothing in `src/` touches `SIGPIPE`; Kaappi survives
+pipe writes only because Zig's `std.start` sets it to `SIG_IGN` by default
+(`std.options.keep_sigpipe == false`) — an implicit invariant that does not
+hold for an embedder linking the runtime as a library, where the host's
+first write to a dead child would kill the host. Phase 1 therefore sets
+`SIGPIPE` to `SIG_IGN` explicitly during runtime init (idempotent alongside
+the start-code default) and documents the invariant.
 
 ### Reaping: reactor child-exit readiness
 
@@ -306,8 +333,9 @@ On exit-readiness the reactor arm reaps (`waitpid(pid, WNOHANG)` /
 wakes all waiters. Reaping happens exactly once, at the reactor, so there
 is no SIGCHLD handler, no race with children spawned by C FFI libraries,
 and no interference between threads: the Process is watched by the
-scheduler of the thread that spawned it (thread-affinity enforced by
-`owner`, matching the channel/port precedent from the KEP-0002 work).
+scheduler of the thread that spawned it (thread-affinity enforced by the
+header `Object.owner` check, matching the channel precedent from the
+KEP-0002 work).
 
 `process-wait` with no scheduler present (plain `main`, no fibers) falls
 back to a blocking `waitpid`/`WaitForSingleObject` — the same degradation
@@ -320,21 +348,30 @@ table as usual (no second list):
 
 | Procedure | Notes |
 |---|---|
-| `(spawn-process argv opt...)` | options: `stdin:`/`stdout:`/`stderr:` specs, `directory:`, `env:` (alist, replaces), `new-group:`, `pass-fds:` (list of fd-backed ports) |
+| `(spawn-process argv opt...)` | options: `stdin:`/`stdout:`/`stderr:` specs, `directory:`, `env:` (alist of `(name . value)` string pairs; **replaces** the environment wholesale — Guile/Python semantics; `(process-environment)` returns the current environment as such an alist for the copy-and-extend idiom), `new-group:`, `pass-fds:` (list of fd-backed ports) |
 | `(process? x)` `(process-pid p)` `(process-group p)` | |
-| `(process-stdin p)` `(process-stdout p)` `(process-stderr p)` | port or `#f` |
+| `(process-stdin p)` `(process-stdout p)` `(process-stderr p)` | the pipe port for a `'pipe` spec; `#f` for every other spec (`'inherit`, `'null`, a caller-supplied port, and stderr under the `'stdout` merge) |
 | `(process-status p)` | `#f` while running; exit code; `(signaled . n)` |
-| `(process-wait p ['timeout: s])` | parks fiber; `#f` on timeout (child lives — Python's contract) |
-| `(process-kill p ['signal: n] ['group: bool])` | SIGTERM default; TerminateProcess on Windows |
+| `(process-wait p ['timeout: s])` | parks fiber; `#f` on timeout (child lives — Python's contract); on an already-reaped process returns the stored status immediately |
+| `(process-kill p ['signal: n] ['group: bool])` | SIGTERM default; a no-op on an already-reaped process (Python's `Popen.kill` contract — the pid must never be re-signaled after reaping, it may be reused). Windows: `TerminateProcess` (or `TerminateJobObject` with `group: #t`); `signal:` values have no Windows analogue and are folded into the child's exit code as `TerminateProcess`'s argument |
 | `(run-process argv opt...)` | one-shot: spawn → drain via internal fibers → wait → `(values status out err)`; `input:`, `timeout:` (kill group + drain + raise `process-timeout` with partial output) |
 
 Error taxonomy per KEP-0005: spawn failure raises a file-error-family
 condition carrying errno detail (program not found vs. permission); type
 errors go through `primitives.typeError` as everywhere.
 
-A `kaappi-process` cond-expand feature identifier is derived from the
-library's presence, so portable code can gate:
-`(cond-expand (kaappi-process ...) (else ...))`.
+Portable code gates on the library's presence with the `(library …)`
+requirement form, which `cond-expand` already supports with zero new
+machinery (`src/vm_library.zig:411`):
+
+```scheme
+(cond-expand ((library (kaappi process)) ...) (else ...))
+```
+
+No `kaappi-process` feature identifier is added: the #1649 derivation
+yields only `srfi-<n>` identifiers and `types.platform_features` is a
+hand-kept constant — extending either buys nothing over the `(library …)`
+form.
 
 ### Tests
 
@@ -404,7 +441,7 @@ library's presence, so portable code can gate:
 | Linux (all arches) | posix_spawn | `pidfd_open` + epoll | full |
 | FreeBSD / OpenBSD / NetBSD | posix_spawn | kqueue `EVFILT_PROC` | full |
 | Windows x86_64/ARM64 | CreateProcess | handle in polled set | full |
-| WASI | — | — | library absent; feature not advertised |
+| WASI | — | — | library absent; `(library (kaappi process))` cond-expand gate is false |
 
 Backward compatibility: purely additive — a new library, a new heap type,
 no changes to existing exports. `--sandbox` excludes it (`.sandbox =
@@ -422,16 +459,18 @@ mandatory per the `.scm`-tests-are-not-native-evidence rule.
    thread's scheduler. Should a wait from another SRFI-18 thread raise (as
    cross-heap port use does) or be supported via the notifier? Proposed:
    raise, matching the port precedent; a wrapper can bridge via a channel.
-3. **`env:` merge vs. replace.** Proposed: replace (Guile/Python
-   semantics), with `(process-environment)` helper for the copy-and-extend
-   idiom. Racket merges; survey is split.
-4. **Zombie discipline for never-waited processes.** The reactor reaps on
+3. **Zombie discipline for never-waited processes.** The reactor reaps on
    exit regardless of waiters, so no zombies accumulate while the
-   scheduler runs — but a program that spawns and exits `main` without a
-   scheduler tick could leave one. Proposed: reap-on-GC-finalize as a
-   backstop, or document that `run-process`/`process-wait` are the
-   contract. Needs a decision in Phase 1.
-5. **Exact status encoding.** Flat integer plus `(signaled . n)` pair vs.
+   scheduler runs. A parent that *exits* is no hazard either — its
+   zombies are reparented to init and reaped there. The real window is a
+   long-running parent whose owning thread never runs a scheduler tick
+   (nor the blocking no-scheduler fallback) yet keeps spawning: those
+   zombies accumulate for the program's lifetime. Proposed: a bounded
+   `waitpid(WNOHANG)` sweep of that thread's unreaped processes on the
+   blocking spawn/wait paths (cheap, covers the scheduler-less loop),
+   with reap-on-GC-finalize considered only if a concrete program
+   escapes the sweep. Needs a decision in Phase 1.
+4. **Exact status encoding.** Flat integer plus `(signaled . n)` pair vs.
    SRFI 170-style decoder procedures. Bikeshed to settle on the PR.
 
 ## Implementation plan
@@ -444,8 +483,9 @@ mandatory per the `.scm`-tests-are-not-native-evidence rule.
 2. **Phase 2 — reactor reaping.** `registerProcess` across kqueue/epoll
    backends; fiber-parking `process-wait` with timeout; group kill.
    Fiber-starvation and timeout-contract tests.
-3. **Phase 3 — Windows.** CreateProcess spawn, handle-based reaping in the
-   #1608 loop, quoting rules shared with `thottam_proc.zig`.
+3. **Phase 3 — Windows.** CreateProcess spawn, Job-Object-based
+   `new-group:`/tree-kill, handle-based reaping in the #1608 loop,
+   quoting rules shared with `thottam_proc.zig`.
 4. **Phase 4 — high level + release.** `run-process` with drain fibers,
    `process-timeout` condition, docs (`docs/dev/` + a kaappi-lang.org
    guide page + cookbook recipe), cond-expand feature, native-tier
