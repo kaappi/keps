@@ -5,7 +5,7 @@
 | **KEP** | 0004 |
 | **Title** | Discoverable Deviations from R7RS-small |
 | **Author** | Baiju Muthukadan <baiju.m.mail@gmail.com> |
-| **Status** | Accepted (amended 2026-08-28: Phase 2 gate cleared but identifier unshipped — see Implementation plan; naming and ship-gate questions resolved) |
+| **Status** | Accepted (amended 2026-08-28: Phase 2 shipped — see Implementation plan; naming and ship-gate questions resolved) |
 | **Type** | Standards |
 | **Target** | `kaappi` core (compiler, VM library loader), `kaappi.github.io` (new conformance page) |
 | **Created** | 2026-07-13 |
@@ -358,9 +358,12 @@ is, by KEP-0002's own admission, still finding correctness bugs in review.
    review findings
    ([#1487](https://github.com/kaappi/kaappi/issues/1487)/[#1489](https://github.com/kaappi/kaappi/issues/1489))
    closed by 2026-07-14, and KEP-0002 has since shipped every phase
-   (v0.15.0/v0.16.0) — both candidate gates have passed, so the distinction
-   no longer selects different behavior. The remaining work is doing
-   Phase 2, not deciding when it may start.
+   (v0.15.0/v0.16.0) — both candidate gates had passed well before Phase 2
+   was done, so the distinction never selected different behavior. What
+   actually set the date was neither candidate but the Implementation
+   plan's own stricter phrasing, "Phase 3 on `main` **with its review
+   findings resolved**": Phase 3 merged while #1489 was still open, and
+   the findings are what the identifier waited on.
 3. **Runtime-variance companions**: sandbox thread-blocking and WASI
    reactor degradation are real but fundamentally unexpressible by
    `cond-expand`. Worth a paired runtime predicate (`(kaappi-threads-
@@ -396,9 +399,10 @@ threads` omitted on `wasi`). Verified against a built binary and via
 `features-consistency.scm` (#1177), extended with the three new
 identifiers for Scheme-level parity with the Zig-side tests.
 
-**Phase 2 — `kaappi-shared-channels`. Gate cleared (2026-07-14); identifier
-still unshipped — now this KEP's one unblocked open work item (updated
-2026-08-28).** The original gate was: KEP-0002's cross-thread wakeup (Phase
+**Phase 2 — `kaappi-shared-channels`. Shipped:
+[kaappi#2402](https://github.com/kaappi/kaappi/pull/2402)** (gate cleared
+2026-07-14, identifier landed 2026-08-28). The original gate was: KEP-0002's
+cross-thread wakeup (Phase
 3) on `main` with its review findings resolved. Phase 3 shipped
 ([kaappi#1485](https://github.com/kaappi/kaappi/pull/1485),
 [#1486](https://github.com/kaappi/kaappi/pull/1486)), and both bugs this
@@ -416,14 +420,31 @@ safety one, and does not re-block this phase; the channel-identity
 divergence ([kaappi#2394](https://github.com/kaappi/kaappi/issues/2394))
 closed 2026-08-28 via [kaappi#2397](https://github.com/kaappi/kaappi/pull/2397).
 
-Despite all that, the identifier itself has never landed:
-`types.platform_features` on kaappi `main` (`5e1680f2`, 2026-08-28) carries
-`kaappi-fibers`, `kaappi-reactor`, `kaappi-threads`, and KEP-0005's
-`kaappi-diagnostics`, but no `kaappi-shared-channels` — and no commit on
-any branch has ever added it.
-The Phase 4 docs page already states this honestly ("the fixes have shipped,
-the identifier has not yet"), so the docs surface is current; the code
-surface is the gap. Phase 2 is unblocked and actionable.
+The identifier nonetheless went unwritten for six weeks after its gate
+cleared: `types.platform_features` on kaappi `main` at `5e1680f2`
+(2026-08-28) carried `kaappi-fibers`, `kaappi-reactor`, `kaappi-threads`,
+and KEP-0005's `kaappi-diagnostics`, but no `kaappi-shared-channels`, and no
+commit on any branch had ever added it. kaappi#2402 closes that gap.
+
+It sits on the **non-wasm** branch of `platform_features`, beside
+`kaappi-threads` rather than in the always-compiled-in base array: promotion
+requires OS threads, and §5 above records that on wasm32-wasi the reactor's
+`notify` is a no-op nothing ever calls, so no promotion can occur there.
+Coverage follows Phase 1's pattern — a Zig-side `cond-expand` test asserting
+each platform's correct answer (the unit suite builds for wasm since
+[kaappi#2153](https://github.com/kaappi/kaappi/issues/2153), so both are
+assertable), the `srfiFeatureNumber` parser test confirming the name is not
+mistaken for an SRFI id, and `features-consistency.scm` (#1177) extended for
+Scheme-level parity. `tests/scheme/errors/features.sh` derives its checks
+from the built binary, so `kaappi features`, `(features)`, and `cond-expand`
+are held in agreement by construction rather than by three hand-kept lists.
+
+The Phase 4 docs page had stated the gap honestly throughout ("the fixes
+have shipped, the identifier has not yet"); with the identifier landed, that
+row now names it instead
+([kaappi.github.io#39](https://github.com/kaappi/kaappi.github.io/pull/39)),
+noting the two builds where its absence is correct — wasm32-wasi, and
+releases up to v0.25.0 that predate it.
 
 **Phase 3 — `kaappi-shared-buffers`.** Gated on KEP-0003 reaching Accepted
 and shipping its own Phase 1. KEP-0003 is unchanged (Draft, skeleton, no
