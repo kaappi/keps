@@ -69,6 +69,7 @@ Withdrawn   Rejected / Superseded
 | [0019](keps/0019-reader.md) | The Datum Reader | Draft (Informational) | `kaappi` core |
 | [0020](keps/0020-ir-and-bytecode-emission.md) | The IR Pipeline and Bytecode Emitter | Draft (Informational) | `kaappi` core |
 | [0021](keps/0021-bytecode-vm.md) | The Register-Based Bytecode VM | Draft (Informational) | `kaappi` core |
+| [0022](keps/0022-subprocess-support.md) | Native Subprocess Support — `(kaappi process)` | Draft | `kaappi` core |
 
 ## License
 
