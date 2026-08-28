@@ -5,7 +5,7 @@
 | **KEP** | 0004 |
 | **Title** | Discoverable Deviations from R7RS-small |
 | **Author** | Baiju Muthukadan <baiju.m.mail@gmail.com> |
-| **Status** | Accepted |
+| **Status** | Accepted (amended 2026-08-28: Phase 2 gate cleared but identifier unshipped — see Implementation plan; naming and ship-gate questions resolved) |
 | **Type** | Standards |
 | **Target** | `kaappi` core (compiler, VM library loader), `kaappi.github.io` (new conformance page) |
 | **Created** | 2026-07-13 |
@@ -19,16 +19,23 @@ building `zig-out/bin/kaappi` at that commit and running the repro snippets in
 the Motivation directly. Doc-site references are pinned against the
 `kaappi.github.io` `main` branch as of the same date.*
 
+*Amended 2026-08-28: implementation-plan statuses re-verified against kaappi
+`main` at [`5e1680f2`](https://github.com/kaappi/kaappi/commit/5e1680f2)
+(2026-08-28, post v0.25.0). The design sections below are unchanged and stay
+pinned to `55ccff0b`; the Summary, the Implementation plan, Unresolved
+questions 1–2, and one Alternatives note carry dated updates.*
+
 ## Summary
 
 Kaappi's core language is essentially complete R7RS-small — but the KEP
 process itself (this repository) exists precisely to add things R7RS-small
 has no opinion on: fibers and an I/O reactor (KEP-0001, shipped), cross-thread
-channels (KEP-0002, partially shipped), and eventually shared mutable buffers
-(KEP-0003, drafted). None of this is currently **discoverable** by a Scheme
-program or a Scheme programmer without reading Zig source or this KEP
-repository. This proposal adds two independent, complementary surfaces for
-exactly that:
+channels (KEP-0002, partially shipped at this KEP's writing; fully shipped
+since — v0.15.0/v0.16.0, per its 2026-08-27 as-implemented amendment), and
+eventually shared mutable buffers (KEP-0003, drafted). None of this is
+currently **discoverable** by a Scheme program or a Scheme programmer
+without reading Zig source or this KEP repository. This proposal adds two
+independent, complementary surfaces for exactly that:
 
 1. **A code-level surface** — `cond-expand` (SRFI 0) feature identifiers for
    the KEP subsystems, so portable library code can branch on what a given
@@ -276,7 +283,10 @@ drift out of date the way CONFORMANCE.md drifted before KEP-0001 shipped.
   into this KEP.** Deferred: `platform_features` has zero OS/arch entries
   today, which is a real, separate gap, but it's orthogonal to the
   concurrency-subsystem question this KEP was asked to address — a future
-  KEP.
+  KEP. *(Partially overtaken 2026-08-28: the Windows-target work shipped
+  exactly one OS-class identifier — `windows` on Windows, `posix`
+  everywhere else — via [kaappi#1606](https://github.com/kaappi/kaappi/pull/1606),
+  without a KEP. Architecture identifiers remain absent.)*
 - **Docs-only, no feature identifiers.** Rejected: a human-readable page
   doesn't help a library author write one codebase that runs correctly
   against both a pre- and post-KEP-0002 Kaappi; every implementation
@@ -335,11 +345,22 @@ is, by KEP-0002's own admission, still finding correctness bugs in review.
    unprefixed style of `posix`/`ieee-float`). Prefixed avoids collision with
    any future officially standardized concurrency feature name; this KEP's
    table above assumes prefixed but the choice is genuinely open.
+   **Resolved 2026-08-28: prefixed.** Phase 1 shipped the `kaappi-*` forms
+   ([kaappi#1488](https://github.com/kaappi/kaappi/pull/1488)) and KEP-0005
+   independently followed the convention with `kaappi-diagnostics`, so the
+   prefixed namespace is now established practice, not an open choice.
 2. **`kaappi-shared-channels` ship gate**: the moment KEP-0002 Phase 3
    merges to `main`, or only once the full KEP reaches Final? Leaning
    toward Phase 3 merge — cross-thread send/receive is safe and complete at
    that point; later phases (`(kaappi parallel)`, multi-core HTTP) are
    ecosystem-library work built on top, not core-subsystem safety.
+   **Resolved by events, 2026-08-28.** Phase 3 merged 2026-07-13 with its
+   review findings
+   ([#1487](https://github.com/kaappi/kaappi/issues/1487)/[#1489](https://github.com/kaappi/kaappi/issues/1489))
+   closed by 2026-07-14, and KEP-0002 has since shipped every phase
+   (v0.15.0/v0.16.0) — both candidate gates have passed, so the distinction
+   no longer selects different behavior. The remaining work is doing
+   Phase 2, not deciding when it may start.
 3. **Runtime-variance companions**: sandbox thread-blocking and WASI
    reactor degradation are real but fundamentally unexpressible by
    `cond-expand`. Worth a paired runtime predicate (`(kaappi-threads-
@@ -375,26 +396,39 @@ threads` omitted on `wasi`). Verified against a built binary and via
 `features-consistency.scm` (#1177), extended with the three new
 identifiers for Scheme-level parity with the Zig-side tests.
 
-**Phase 2 — `kaappi-shared-channels`. Still blocked, correctly.** Gated on
-KEP-0002's cross-thread wakeup (Phase 3) landing on `main` with its review
-findings resolved. Phase 3 itself shipped
+**Phase 2 — `kaappi-shared-channels`. Gate cleared (2026-07-14); identifier
+still unshipped — now this KEP's one unblocked open work item (updated
+2026-08-28).** The original gate was: KEP-0002's cross-thread wakeup (Phase
+3) on `main` with its review findings resolved. Phase 3 shipped
 ([kaappi#1485](https://github.com/kaappi/kaappi/pull/1485),
-[#1486](https://github.com/kaappi/kaappi/pull/1486)), but "review findings
-resolved" is not yet true: two bugs opened against the exact mechanism this
-identifier would advertise are still open —
-[kaappi#1487](https://github.com/kaappi/kaappi/issues/1487) (a dirty-
-snapshot dispatch hazard in `mutex-lock!`/`condition-variable-wait!`/
-`thread-sleep!`) and, more directly on point,
-[kaappi#1489](https://github.com/kaappi/kaappi/issues/1489) (a **permanent
-hang**: a local sibling send+receive during the `SharedChannelPoll` drive
-can disarm the notifier registration before park). This is precisely the
-gating scenario Motivation described in the abstract (the earlier
-unmerged-wakeup SIGABRT risk); #1489 is its concrete successor. Phase 2
-does not start until both are closed.
+[#1486](https://github.com/kaappi/kaappi/pull/1486)), and both bugs this
+section named as blockers closed within days of this KEP's acceptance —
+[kaappi#1487](https://github.com/kaappi/kaappi/issues/1487) (the dirty-
+snapshot dispatch hazard) on 2026-07-13 and
+[kaappi#1489](https://github.com/kaappi/kaappi/issues/1489) (the permanent
+hang in the `SharedChannelPoll` drive) on 2026-07-14. KEP-0002 has since
+shipped in full (all seven phases, v0.15.0/v0.16.0; its 2026-08-27
+as-implemented amendment records the trail), so the gate is satisfied under
+either reading of Unresolved question 2. KEP-0002's one remaining open item,
+[kaappi#2395](https://github.com/kaappi/kaappi/issues/2395) (`thread-join!`
+and cross-thread mutex/condvar poll at ~1 ms), is a latency concern, not a
+safety one, and does not re-block this phase; the channel-identity
+divergence ([kaappi#2394](https://github.com/kaappi/kaappi/issues/2394))
+closed 2026-08-28 via [kaappi#2397](https://github.com/kaappi/kaappi/pull/2397).
+
+Despite all that, the identifier itself has never landed:
+`types.platform_features` on kaappi `main` (`5e1680f2`, 2026-08-28) carries
+`kaappi-fibers`, `kaappi-reactor`, `kaappi-threads`, and KEP-0005's
+`kaappi-diagnostics`, but no `kaappi-shared-channels` — and no commit on
+any branch has ever added it.
+The Phase 4 docs page already states this honestly ("the fixes have shipped,
+the identifier has not yet"), so the docs surface is current; the code
+surface is the gap. Phase 2 is unblocked and actionable.
 
 **Phase 3 — `kaappi-shared-buffers`.** Gated on KEP-0003 reaching Accepted
 and shipping its own Phase 1. KEP-0003 is unchanged (Draft, skeleton, no
-code) as of this update.
+code — its 2026-07-16 gate evaluation read "Between" and kept it gated),
+re-verified 2026-08-28.
 
 **Phase 4 — `conformance.md`. Shipped:
 [kaappi.github.io#5](https://github.com/kaappi/kaappi.github.io/pull/5).**
