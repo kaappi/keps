@@ -5,7 +5,7 @@
 | **KEP** | 0002 |
 | **Title** | Cross-Thread Channels and Multi-Core Fiber Scheduling |
 | **Author** | Baiju Muthukadan <baiju.m.mail@gmail.com> |
-| **Status** | Accepted (amended 2026-07-16: §6 capacity-0 rendezvous; amended 2026-08-27: [As implemented](#as-implemented-v0150v0160--amended-2026-08-27) — channel identity and join-notify open, tracked in kaappi; amended 2026-08-28: channel identity resolved as comparators, [kaappi#2397](https://github.com/kaappi/kaappi/pull/2397) — join-notify the one open item) |
+| **Status** | Final (amended 2026-07-16: §6 capacity-0 rendezvous; amended 2026-08-27: [As implemented](#as-implemented-v0150v0160--amended-2026-08-27) — channel identity and join-notify open, tracked in kaappi; amended 2026-08-28: channel identity resolved as comparators, [kaappi#2397](https://github.com/kaappi/kaappi/pull/2397), and promoted to `Final` — join-notify remains tracked in kaappi#2395) |
 | **Type** | Standards |
 | **Target** | `kaappi` core (GC/scheduler/reactor/channels), new `(kaappi parallel)` library, with downstream effects on `kaappi-net`, `kaappi-http` |
 | **Created** | 2026-07-12 |
@@ -33,8 +33,12 @@ completed via [kaappi#2397](https://github.com/kaappi/kaappi/pull/2397)
 [`10a5be1`](https://github.com/kaappi/kaappi/commit/10a5be17f03f637e9a8a17406f97f2b3e26bfe82)).
 The global predicates stay stub-identity by decision; identity ships as
 the `channel=?`/`channel-hash`/`channel-comparator` surface in
-`(kaappi fibers)`. Unresolved question 3 (kaappi#2395) is now the only
-open item.*
+`(kaappi fibers)`. With the last design-vs-implementation divergence
+closed, the status is promoted to `Final`; Unresolved question 3 stays
+open and tracked in
+[kaappi#2395](https://github.com/kaappi/kaappi/issues/2395). The
+reasoning is recorded under
+[Status of the unresolved questions](#status-of-the-unresolved-questions-after-this-amendment).*
 
 ## Summary
 
@@ -1759,6 +1763,23 @@ UQ1 resolved (levers B and C both promoted to shipped defaults after the
 resolution text was written; D unshipped per the gate); UQ2 settled (both
 disjuncts kept); UQ3 open and tracked (kaappi#2395); UQ4 resolved
 2026-08-28 (comparators, not predicates — kaappi#2394 closed by
-kaappi#2397); UQ5 settled; UQ6 closed (documentation alone). Per this
-repository's process, the KEP stays `Accepted` until UQ3 resolves or
-kaappi#2395 closes; everything else is reconciled.
+kaappi#2397); UQ5 settled; UQ6 closed (documentation alone). Everything
+else is reconciled.
+
+*Amended 2026-08-28: status promoted from `Accepted` to `Final`.* The
+2026-08-27 text held the KEP at `Accepted` "until UQ3 and UQ4 resolve or
+their tracking issues close" — the stricter of the two readings
+[the process](../README.md#process) admits. That was right while UQ4
+stood, for a reason independent of any follow-up: §2 promised an
+observable semantics that never shipped, so the document was not yet
+*reconciled with what shipped*, which the process makes a precondition
+for `Final` in its own right. UQ4 is now resolved and that promise is
+gone. The sole residual, UQ3, is a deferred optimization the KEP itself
+contemplated ("in scope for Phase 3 if cheap, else follow-up"); the
+shipped behavior is correct, only latency-granular, and it is
+*explicitly tracked in the target repo* (kaappi#2395) — which the
+process names as sufficient. KEP-0001 is `Final` on the same footing,
+its Q5 native-frame residual still inconclusive. Recorded here so the
+stricter reading ends by decision rather than by momentum; if UQ3 later
+lands, amend as `Final` KEPs are amended (KEP-0001's 2026-08-27
+amendment is the precedent).
