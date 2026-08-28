@@ -5,7 +5,7 @@
 | **KEP** | 0002 |
 | **Title** | Cross-Thread Channels and Multi-Core Fiber Scheduling |
 | **Author** | Baiju Muthukadan <baiju.m.mail@gmail.com> |
-| **Status** | Accepted (amended 2026-07-16: §6 capacity-0 rendezvous; amended 2026-08-27: [As implemented](#as-implemented-v0150v0160--amended-2026-08-27) — channel identity and join-notify open, tracked in kaappi) |
+| **Status** | Accepted (amended 2026-07-16: §6 capacity-0 rendezvous; amended 2026-08-27: [As implemented](#as-implemented-v0150v0160--amended-2026-08-27) — channel identity and join-notify open, tracked in kaappi; amended 2026-08-28: channel identity resolved as comparators, [kaappi#2397](https://github.com/kaappi/kaappi/pull/2397) — join-notify the one open item) |
 | **Type** | Standards |
 | **Target** | `kaappi` core (GC/scheduler/reactor/channels), new `(kaappi parallel)` library, with downstream effects on `kaappi-net`, `kaappi-http` |
 | **Created** | 2026-07-12 |
@@ -25,6 +25,16 @@ amendment in v0.16.0, and the §9 ecosystem phase in the downstream repos.
 The [As implemented](#as-implemented-v0150v0160--amended-2026-08-27) section
 records the PR trail and the divergences — one of them (channel identity,
 Unresolved question 4) unimplemented and now tracked.*
+
+*Amended 2026-08-28: the channel-identity divergence is resolved —
+[kaappi#2394](https://github.com/kaappi/kaappi/issues/2394) closed as
+completed via [kaappi#2397](https://github.com/kaappi/kaappi/pull/2397)
+(merged as
+[`10a5be1`](https://github.com/kaappi/kaappi/commit/10a5be17f03f637e9a8a17406f97f2b3e26bfe82)).
+The global predicates stay stub-identity by decision; identity ships as
+the `channel=?`/`channel-hash`/`channel-comparator` surface in
+`(kaappi fibers)`. Unresolved question 3 (kaappi#2395) is now the only
+open item.*
 
 ## Summary
 
@@ -522,6 +532,14 @@ them compare channel stubs by heap identity today, `write` prints a bare
 per-heap dedup, so the same channel received twice is not `eqv?` to itself
 on one thread. See Unresolved question 4's amendment; tracked in
 [kaappi#2394](https://github.com/kaappi/kaappi/issues/2394).)*
+*(Amended 2026-08-28: resolved — kaappi#2394 closed as completed via
+[kaappi#2397](https://github.com/kaappi/kaappi/pull/2397), merged as
+[`10a5be1`](https://github.com/kaappi/kaappi/commit/10a5be17f03f637e9a8a17406f97f2b3e26bfe82).
+This paragraph's promise is replaced, not implemented: `eq?`/`eqv?`/
+`equal?` stay stub-identity by decision, and identity ships instead as
+the SRFI-128-style comparator surface `channel=?`/`channel-hash`/
+`channel-comparator` in `(kaappi fibers)`. `write` is untouched and
+still prints a bare `#<channel>`.)*
 
 **Foreign channel objects become a descriptive error — promoted or not.**
 Every channel primitive checks `ch.header.owner != gc.id` and raises
@@ -1234,7 +1252,10 @@ port-first order sketched above.
 - **`eq?` on channels is no longer identity across threads** (stubs);
   `eqv?`/`equal?` compensate, but it is a subtlety users can trip on.
   *(Amended 2026-08-27: the compensation is not implemented — see §2's
-  amendment and Unresolved question 4 / kaappi#2394.)*
+  amendment and Unresolved question 4 / kaappi#2394.)* *(Amended
+  2026-08-28: the compensation shipped as `channel=?`/`channel-hash`/
+  `channel-comparator` rather than the global predicates —
+  [kaappi#2397](https://github.com/kaappi/kaappi/pull/2397).)*
 - **Channel dispatch branch** on every send/receive — one predictable
   null-check on the local fast path; expected unmeasurable, verified in
   Phase 1 benchmarks.
@@ -1548,6 +1569,19 @@ the §9 accept-distribution measurement (P7).*
    only invariants it imposes on the lattice (`eq?` ⇒ `eqv?`,
    `eqv?` ⇒ `equal?`) hold today and under every proposed outcome — full
    analysis on the issue.)*
+
+   *(Resolved 2026-08-28: the comparator route — option 1b on the issue
+   — shipped in [kaappi#2397](https://github.com/kaappi/kaappi/pull/2397)
+   (merged as
+   [`10a5be1`](https://github.com/kaappi/kaappi/commit/10a5be17f03f637e9a8a17406f97f2b3e26bfe82)),
+   closing kaappi#2394 as completed. `eq?`/`eqv?`/`equal?` stay
+   stub-identity by decision; `(kaappi fibers)` now exports `channel=?`,
+   `channel-hash`, and `channel-comparator`, the last built by the real
+   `(srfi 128)` `make-comparator` so hash tables and hand-built
+   comparators agree. `write` is untouched — no stable shared-channel id
+   shipped; it still prints a bare `#<channel>`. A future transparent
+   layer over the predicates would compute the same answer as
+   `channel=?`, so the door stays open without a tracking issue.)*
 5. **`parallel-map` chunking policy** (one task per element vs. N chunks)
    and whether `pool-submit` results should be first-class channels (as
    specified) or an opaque `task` record. Library-level; decide in Phase 5
@@ -1689,10 +1723,16 @@ condition (see the §6 amendment; the user-docs gap is
 
 ### Divergences
 
-1. **Channel identity (§2) — not implemented, tracked.** `eqv?`/`equal?`
-   compare stubs by heap identity and `write` prints no shared id; §2's
-   promise is unfulfilled. See Unresolved question 4's amendment and
-   [kaappi#2394](https://github.com/kaappi/kaappi/issues/2394).
+1. **Channel identity (§2) — resolved as amended 2026-08-28.** §2's
+   promise that `eqv?`/`equal?` compare the shared pointer was replaced,
+   not implemented:
+   [kaappi#2397](https://github.com/kaappi/kaappi/pull/2397) (merged as
+   `10a5be1`) closed
+   [kaappi#2394](https://github.com/kaappi/kaappi/issues/2394) with the
+   comparator route — the global predicates stay stub-identity by
+   decision, and identity ships as `channel=?`/`channel-hash`/
+   `channel-comparator` in `(kaappi fibers)`. `write` still prints a
+   bare `#<channel>`. See Unresolved question 4's amendments.
 2. **Q1-B superseded after the resolution was written.** The arena cleared
    clause 2 and shipped as the default (#1555 → #1560, v0.15.0); see the
    Q1-B amendment above.
@@ -1717,8 +1757,8 @@ condition (see the §6 amendment; the user-docs gap is
 
 UQ1 resolved (levers B and C both promoted to shipped defaults after the
 resolution text was written; D unshipped per the gate); UQ2 settled (both
-disjuncts kept); UQ3 open and tracked (kaappi#2395); UQ4 open and tracked
-— the one design-vs-implementation divergence (kaappi#2394); UQ5 settled;
-UQ6 closed (documentation alone). Per this repository's process, the KEP
-stays `Accepted` until UQ3 and UQ4 resolve or their tracking issues close;
-everything else is reconciled.
+disjuncts kept); UQ3 open and tracked (kaappi#2395); UQ4 resolved
+2026-08-28 (comparators, not predicates — kaappi#2394 closed by
+kaappi#2397); UQ5 settled; UQ6 closed (documentation alone). Per this
+repository's process, the KEP stays `Accepted` until UQ3 resolves or
+kaappi#2395 closes; everything else is reconciled.
