@@ -9,7 +9,7 @@
 | **Type** | Standards |
 | **Target** | `kaappi` core (new shared-buffer type, GC/deepCopy integration), `(kaappi parallel)` |
 | **Created** | 2026-07-12 |
-| **Requires** | KEP-0002 (Phases 1–4; see acceptance gate below) |
+| **Requires** | KEP-0002 (Phases 1–4; see acceptance gate below) — satisfied: all KEP-0002 phases shipped in kaappi v0.15.0/v0.16.0 ([As implemented](0002-cross-thread-channels.md#as-implemented-v0150v0160--amended-2026-08-27)), so only the gate holds this KEP now |
 | **Supersedes** | — |
 
 > **Acceptance gate.** This KEP is drafted as a *sibling* of KEP-0002: the
@@ -327,13 +327,16 @@ the record of why.
 decisions are recorded, the mechanics are TODO]**
 
 - **`SharedBuffer` is the second instance of the KEP-0002 shared-object
-  protocol.** Refcounted allocation from the process-global allocator;
-  one counted stub per heap that references it; `+1` on every stub
-  `deepCopy` (thread thunks, channel messages), `−1` in `freeObject`;
-  destroy at zero. Phase 0 lands the KEP-0002 §1 amendment that names
-  this generic protocol so channels and buffers share one audited
-  implementation (refcount state machine, leak discipline, gc-stress
-  coverage) rather than two divergent ones.
+  protocol.** *(Naming caution, 2026-08-28: the identifier is currently
+  occupied in-tree — `src/shared_buffer.zig` is KEP-0002's unshipped
+  lever-D prototype, an immutable COW type, not this KEP's mutable
+  buffer; see Unresolved question 3.)* Refcounted allocation from the
+  process-global allocator; one counted stub per heap that references
+  it; `+1` on every stub `deepCopy` (thread thunks, channel messages),
+  `−1` in `freeObject`; destroy at zero. Phase 0 lands the KEP-0002
+  §1 amendment that names this generic protocol so channels and
+  buffers share one audited implementation (refcount state machine,
+  leak discipline, gc-stress coverage) rather than two divergent ones.
 - **Contents are flat words, so GC invariant 1 survives.** The buffer
   payload (`[]u8` / `[]f64`, 8-byte aligned) contains no `Value`s: no
   marking, no tracing, no cross-heap reachability. The stub is an
@@ -398,8 +401,16 @@ decisions are recorded, the mechanics are TODO]**
   optimizer cannot remove would under-vectorize the plain baseline itself. The
   kaappi#1473 experiment measured the ceiling this requirement targets.
 - **TODO:** exact type surface (§ Unresolved 1), `write`
-  representation, `equal?` semantics, slice objects or offsets-only,
-  sandbox-mode policy. (`--gc-stress` interaction is resolved: compile accesses
+  representation, `equal?` semantics (for these two, note the shipped
+  channel precedent: the 2026-08-28 decision
+  ([kaappi#2397](https://github.com/kaappi/kaappi/pull/2397), closing
+  [kaappi#2394](https://github.com/kaappi/kaappi/issues/2394)) keeps
+  `eqv?`/`equal?` at stub identity and exposes identity as a SRFI-128
+  comparator surface — `channel=?`/`channel-hash`/`channel-comparator`
+  — while `write` still prints no shared id; the precedented route for
+  buffers is a `shared-buffer=?`-style comparator, not an extension of
+  the global predicates), slice objects or offsets-only, sandbox-mode
+  policy. (`--gc-stress` interaction is resolved: compile accesses
   `unordered` — containment 1 above.)
 
 ## Drawbacks
@@ -433,6 +444,19 @@ decisions are recorded, the mechanics are TODO]**
   shows fan-out cost dominating and in-place demand absent, *that*
   design should win and this KEP should be rejected in its favor; the
   two share the Phase 0 protocol either way.
+
+  *(Evaluated 2026-07-16, with an implementation: KEP-0002 Phase 7
+  built this design as gate lever D — `src/shared_buffer.zig`, a
+  refcounted copy-on-write side-heap for bytevectors ≥ 4 KiB on the
+  Phase 0 protocol — measured it, and called **does not ship**. The
+  micro wins are real (2.6–2.8× on a 64 KiB bytevector round trip)
+  but never surface as end-to-end `share` on the registered suite:
+  the gate's copy-dominated payloads are flonum vectors and trees a
+  byte side-heap cannot share. Neither branch of the sentence above
+  fired — the gate read Between, not fan-out-dominant — so this
+  alternative is unshipped but built, retained behind
+  `-Dchannel-instrument` as gate lever `d` for re-runs. Record:
+  KEP-0002, UQ 1 amendment (D); see Unresolved question 3 below.)*
 - **Transfer, not share** (Dart `TransferableTypedData`, JS
   `ArrayBuffer` transfer): move the buffer O(1) and *detach* it from the
   sender — no races, no sharing, sender's handle goes dead. Runtime-
@@ -544,6 +568,21 @@ rest of the KEP.*
    one mechanism with a mutability flag, or two types? One mechanism
    halves the protocol surface; two keeps "immutable ⇒ race-free"
    visible in the type.
+
+   *(Sharpened 2026-08-28, still open: the Erlang lever is no longer
+   hypothetical. KEP-0002's gate lever D implemented it as
+   `SharedBuffer` in `src/shared_buffer.zig` (refcounted COW,
+   bytevectors ≥ 4 KiB, on the Phase 0 protocol); the 2026-07-16 gate
+   call left it unshipped behind `-Dchannel-instrument`, and KEP-0002's
+   UQ 1(D) amendment names this question as the fold-in home for a
+   bytevector-fan-out revival that rides this KEP's gate (a revival on
+   such field evidence can also land directly under that bullet
+   without waiting on this KEP). If this KEP's gate
+   opens, Phase 1 must either subsume that type — the one-mechanism
+   branch, deciding what becomes of its COW machinery — or take a
+   different name, since the two-types branch finds `SharedBuffer`
+   already taken in-tree. Both decisions land on one dataset: the gate
+   re-run (revisit protocol, step 2) measures that same lever.)*
 4. **A transfer/detach variant.** Is `shared-buffer-transfer!` (O(1)
    move, source stub goes dead) worth its API weight as the race-free
    complement, per the JS/Dart precedent?
@@ -628,7 +667,11 @@ In order:
    campaign is turnkey per the worksheet: `benchmarks/gate/run-gate.py`
    + `classify.py`, the Kalibera–Jones floor, `w = 8`, **both lever
    settings**, on both reference machines (macOS aarch64, Linux
-   x86_64).
+   x86_64). Lever `d` survives for exactly this purpose behind
+   `-Dchannel-instrument` — its bytevector checks are comptime-gated
+   out of normal builds
+   ([kaappi#1838](https://github.com/kaappi/kaappi/pull/1838)), so the
+   re-run must build with the flag on.
 3. **Classification reads Racket-shaped on both machines:** with
    levers `C+D` on, ≥ 2 of the 3 `IP-*` workloads with `share ≥ 25 %`
    at some size ≥ 1 MiB, CI lower bound clearing the threshold. Attach
@@ -659,6 +702,7 @@ If the re-run reads otherwise:
 |---|---|---|
 | 2026-07-16 | First gate evaluation (kaappi#1474): pre-registered campaign, both reference machines | **Between**, by two-machine agreement — stays gated. Record: kaappi/keps#25; datasets kaappi#1549 (macOS) / kaappi#1580 (Linux) |
 | 2026-07-16 | Trigger check: systematic survey of `kaappi-examples` @ `aaeff1a` (all 13 apps), adjacent numeric repos (`kaappi-math`, `kaappi-mpl`), and the field-report channels | **Not fired** — no `IP-*` shape anywhere; the one parallel workload (parallel-primes) is a scalar reduction moving ~100 B cross-thread. [Baseline survey](https://github.com/kaappi/kaappi/issues/1596#issuecomment-4991123187) for future checks to diff against |
+| 2026-08-28 | Trigger check (repo diff only, during KEP review): `kaappi-examples` @ `a770089` vs. the baseline; `kaappi-math`/`kaappi-mpl` history since 2026-07-16. Field-report channels not re-surveyed | **Not fired** — no new apps or workload shapes: examples gained only CI/DCO config; the numeric repos gained their v0.1.0 releases, CI/DCO config, docs fixes, and mpl's sqrt import-collision fix ([kaappi-mpl#2](https://github.com/kaappi/kaappi-mpl/pull/2)) |
 
 Future trigger checks diff `kaappi-examples` (and new numeric ecosystem
 apps) against the baseline survey — the latent candidate shapes are a
