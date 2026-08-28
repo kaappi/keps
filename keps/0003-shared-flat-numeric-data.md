@@ -330,13 +330,13 @@ decisions are recorded, the mechanics are TODO]**
   protocol.** *(Naming caution, 2026-08-28: the identifier is currently
   occupied in-tree — `src/shared_buffer.zig` is KEP-0002's unshipped
   lever-D prototype, an immutable COW type, not this KEP's mutable
-  buffer; see Unresolved question 3.)* Refcounted allocation from the process-global allocator;
-  one counted stub per heap that references it; `+1` on every stub
-  `deepCopy` (thread thunks, channel messages), `−1` in `freeObject`;
-  destroy at zero. Phase 0 lands the KEP-0002 §1 amendment that names
-  this generic protocol so channels and buffers share one audited
-  implementation (refcount state machine, leak discipline, gc-stress
-  coverage) rather than two divergent ones.
+  buffer; see Unresolved question 3.)* Refcounted allocation from the
+  process-global allocator; one counted stub per heap that references
+  it; `+1` on every stub `deepCopy` (thread thunks, channel messages),
+  `−1` in `freeObject`; destroy at zero. Phase 0 lands the KEP-0002
+  §1 amendment that names this generic protocol so channels and
+  buffers share one audited implementation (refcount state machine,
+  leak discipline, gc-stress coverage) rather than two divergent ones.
 - **Contents are flat words, so GC invariant 1 survives.** The buffer
   payload (`[]u8` / `[]f64`, 8-byte aligned) contains no `Value`s: no
   marking, no tracing, no cross-heap reachability. The stub is an
@@ -402,10 +402,15 @@ decisions are recorded, the mechanics are TODO]**
   kaappi#1473 experiment measured the ceiling this requirement targets.
 - **TODO:** exact type surface (§ Unresolved 1), `write`
   representation, `equal?` semantics (for these two, note the shipped
-  channel precedent: stubs compare by heap identity and `write` prints
-  no shared id — KEP-0002's live §2 divergence,
-  [kaappi#2394](https://github.com/kaappi/kaappi/issues/2394)), slice
-  objects or offsets-only, sandbox-mode policy. (`--gc-stress` interaction is resolved: compile accesses
+  channel precedent: the 2026-08-28 decision
+  ([kaappi#2397](https://github.com/kaappi/kaappi/pull/2397), closing
+  [kaappi#2394](https://github.com/kaappi/kaappi/issues/2394)) keeps
+  `eqv?`/`equal?` at stub identity and exposes identity as a SRFI-128
+  comparator surface — `channel=?`/`channel-hash`/`channel-comparator`
+  — while `write` still prints no shared id; the precedented route for
+  buffers is a `shared-buffer=?`-style comparator, not an extension of
+  the global predicates), slice objects or offsets-only, sandbox-mode
+  policy. (`--gc-stress` interaction is resolved: compile accesses
   `unordered` — containment 1 above.)
 
 ## Drawbacks
@@ -569,8 +574,10 @@ rest of the KEP.*
    `SharedBuffer` in `src/shared_buffer.zig` (refcounted COW,
    bytevectors ≥ 4 KiB, on the Phase 0 protocol); the 2026-07-16 gate
    call left it unshipped behind `-Dchannel-instrument`, and KEP-0002's
-   UQ 1(D) amendment designates this question as the fold-in home for
-   any revival on bytevector-fan-out field evidence. If this KEP's gate
+   UQ 1(D) amendment names this question as the fold-in home for a
+   bytevector-fan-out revival that rides this KEP's gate (a revival on
+   such field evidence can also land directly under that bullet
+   without waiting on this KEP). If this KEP's gate
    opens, Phase 1 must either subsume that type — the one-mechanism
    branch, deciding what becomes of its COW machinery — or take a
    different name, since the two-types branch finds `SharedBuffer`
@@ -695,7 +702,7 @@ If the re-run reads otherwise:
 |---|---|---|
 | 2026-07-16 | First gate evaluation (kaappi#1474): pre-registered campaign, both reference machines | **Between**, by two-machine agreement — stays gated. Record: kaappi/keps#25; datasets kaappi#1549 (macOS) / kaappi#1580 (Linux) |
 | 2026-07-16 | Trigger check: systematic survey of `kaappi-examples` @ `aaeff1a` (all 13 apps), adjacent numeric repos (`kaappi-math`, `kaappi-mpl`), and the field-report channels | **Not fired** — no `IP-*` shape anywhere; the one parallel workload (parallel-primes) is a scalar reduction moving ~100 B cross-thread. [Baseline survey](https://github.com/kaappi/kaappi/issues/1596#issuecomment-4991123187) for future checks to diff against |
-| 2026-08-28 | Trigger check (repo diff only, during KEP review): `kaappi-examples` @ `a770089` vs. the baseline; `kaappi-math`/`kaappi-mpl` history since 2026-07-16. Field-report channels not re-surveyed | **Not fired** — examples gained only CI/DCO config, no new apps; the numeric repos gained only release/packaging commits (both v0.1.0), no new workload shapes |
+| 2026-08-28 | Trigger check (repo diff only, during KEP review): `kaappi-examples` @ `a770089` vs. the baseline; `kaappi-math`/`kaappi-mpl` history since 2026-07-16. Field-report channels not re-surveyed | **Not fired** — no new apps or workload shapes: examples gained only CI/DCO config; the numeric repos gained their v0.1.0 releases, CI/DCO config, docs fixes, and mpl's sqrt import-collision fix ([kaappi-mpl#2](https://github.com/kaappi/kaappi-mpl/pull/2)) |
 
 Future trigger checks diff `kaappi-examples` (and new numeric ecosystem
 apps) against the baseline survey — the latent candidate shapes are a
