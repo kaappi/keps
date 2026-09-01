@@ -5,7 +5,7 @@
 | **KEP** | 0022 |
 | **Title** | Native Subprocess Support — `(kaappi process)` |
 | **Author** | Baiju Muthukadan <baiju.m.mail@gmail.com> |
-| **Status** | Draft |
+| **Status** | Accepted (amended 2026-09-01: [As implemented](#as-implemented-phases-14--amended-2026-09-01); all four phases landed on `main`, unreleased at time of writing) |
 | **Type** | Standards |
 | **Target** | `kaappi` core (`src/`, reactor, new `(kaappi process)` library) |
 | **Created** | 2026-08-29 |
@@ -15,6 +15,12 @@
 *All code references are pinned to kaappi commit `f0937b21` (main,
 2026-08-28) and were verified directly against that source as of
 2026-08-29.*
+
+*Amended 2026-09-01: all four phases have landed on `main` (unreleased).
+The design below is the proposal as written; the
+[As implemented](#as-implemented-phases-14--amended-2026-09-01) section
+records what shipped, where it differs, and how the four unresolved
+questions were settled. Read them together.*
 
 ## Summary
 
@@ -451,14 +457,33 @@ mandatory per the `.scm`-tests-are-not-native-evidence rule.
 
 ## Unresolved questions
 
+All four are settled; see
+[As implemented](#as-implemented-phases-14--amended-2026-09-01) for the
+as-built detail.
+
 1. **Pseudo-terminal support.** Gambit offers `pseudo-terminal:`; agent
    tools sometimes behave differently without a tty. Deferred — `'pipe`
    covers the driving workload (`pi --rpc` is designed for pipes). Revisit
-   if a concrete consumer needs it.
+   if a concrete consumer needs it. **Resolved (2026-09-01): still
+   deferred, now with four phases of evidence behind it.** Nothing built on
+   the library has wanted a tty, and no shipped procedure would have to
+   change to add one later — `pseudo-terminal:` would be another
+   redirection spec in `parseRedir`, alongside `'pipe` and `'null`. It is
+   deliberately *not* an open follow-up: a KEP that keeps a
+   speculative feature open forever is how a subsystem grows a surface
+   nobody asked for.
 2. **Cross-thread `process-wait`.** A Process is owned by its spawning
    thread's scheduler. Should a wait from another SRFI-18 thread raise (as
    cross-heap port use does) or be supported via the notifier? Proposed:
    raise, matching the port precedent; a wrapper can bridge via a channel.
+   **Resolved (2026-09-01): raise, as proposed** — and not only for
+   `process-wait`. Every entry point except the `process?` predicate
+   checks `Object.owner`
+   (`primitives_process.expectProcess`), the same total treatment channels
+   and thread handles get, so the whole class is unreachable rather than
+   patched procedure by procedure. The condition's irritant is `#f`, never
+   the foreign process: storing a foreign-heap object in a condition the
+   owner's GC may free would reopen exactly the hazard the check closes.
 3. **Zombie discipline for never-waited processes.** The reactor reaps on
    exit regardless of waiters, so no zombies accumulate while the
    scheduler runs. A parent that *exits* is no hazard either — its
@@ -469,11 +494,186 @@ mandatory per the `.scm`-tests-are-not-native-evidence rule.
    `waitpid(WNOHANG)` sweep of that thread's unreaped processes on the
    blocking spawn/wait paths (cheap, covers the scheduler-less loop),
    with reap-on-GC-finalize considered only if a concrete program
-   escapes the sweep. Needs a decision in Phase 1.
+   escapes the sweep. Needs a decision in Phase 1. **Resolved (2026-09-01):
+   the sweep *and* the finalizer.** `sweepUnreaped` runs at the top of the
+   blocking spawn and wait paths as proposed, and
+   `gc_sweep.freeObject` reaps as a last resort — the "considered only
+   if" clause was settled in Phase 1 rather than deferred, because a
+   Process collected while its child still runs is not a hypothetical: it
+   is what a program that spawns and drops the handle does every time.
 4. **Exact status encoding.** Flat integer plus `(signaled . n)` pair vs.
    SRFI 170-style decoder procedures. Bikeshed to settle on the PR.
+   **Resolved (2026-09-01): the flat integer plus the pair.** No decoder
+   procedures, and room left for some later. Windows has neither a wait
+   status word nor signal delivery, so a status there is always the
+   integer `GetExitCodeProcess` reports (see Divergence 5).
+
+## As implemented (Phases 1–4) — amended 2026-09-01
+
+Core landed all four phases on `main` between 2026-08-31 and 2026-09-01,
+ahead of this KEP's ratification:
+[#2442](https://github.com/kaappi/kaappi/pull/2442) (Phase 1, issue
+[#2414](https://github.com/kaappi/kaappi/issues/2414)),
+[#2445](https://github.com/kaappi/kaappi/pull/2445) (Phase 2, issue
+[#2415](https://github.com/kaappi/kaappi/issues/2415)),
+[#2450](https://github.com/kaappi/kaappi/pull/2450) (Phase 3, issue
+[#2416](https://github.com/kaappi/kaappi/issues/2416)), and
+[#2455](https://github.com/kaappi/kaappi/pull/2455) (Phase 4, issue
+[#2417](https://github.com/kaappi/kaappi/issues/2417)). This amendment
+accepts them retroactively and records the deltas.
+
+**Status is `Accepted`, not `Final`:** nothing here has shipped in a
+release — v0.25.0 (2026-08-27) predates Phase 1 — and the process reserves
+`Final` for a released, reconciled design. The remaining step is the next
+release, plus the two follow-ups flagged below.
+
+As-built citations are pinned to commit
+[`3fce40d2`](https://github.com/kaappi/kaappi/commit/3fce40d2) (main,
+2026-09-01) plus Phase 4 in #2455.
+[`docs/dev/subprocess.md`](https://github.com/kaappi/kaappi/blob/main/docs/dev/subprocess.md)
+is the as-built maintenance record and owns the internal detail; this
+section records only what differs from, or was added to, the design above.
+
+### What shipped as designed
+
+- **No fork anywhere, and no pre-exec hook.** `posix_spawnp` with file
+  actions (`process_posix.zig`), `CreateProcessW` (`process_win.zig`);
+  every knob between spawn and exec is a named option, as the survey's
+  lesson 2 demanded.
+- **Close-by-default, no allowlist.** The child gets slots 0, 1 and 2 and
+  nothing else, asserted end to end by spawning `sh -c 'ls /dev/fd'`
+  (`tests_process.zig`). macOS uses `POSIX_SPAWN_CLOEXEC_DEFAULT`; Linux
+  and the BSDs scan and close.
+- **Reap at the reactor, never SIGCHLD.** kqueue `EVFILT_PROC`, Linux
+  `pidfd_open` + epoll, a Windows process HANDLE in the polled set. Exactly
+  one reap, at one place, so there is no race with children a C FFI library
+  spawned.
+- **`process-wait` parks the calling fiber**, with `timeout:` returning
+  `#f` and leaving the child alive (Python's contract), and the blocking
+  `waitpid` surviving only as the no-scheduler fallback.
+- **Ports are ordinary ports.** The pipe parent-ends go through
+  `primitives_io.makeFdPort`, the same constructor `fd->port` uses, so
+  every port primitive works and a blocking read parks one fiber.
+- **A `Process` heap type with the channel-style owner check**, the five
+  GC switches, and deep-copy refusal.
+- **`(library (kaappi process))` as the only gate**, with no
+  `kaappi-process` feature identifier — false on wasm32-wasi and under
+  `--sandbox`, and true everywhere else.
+- **The redirection vocabulary** — `'inherit`, `'pipe`, `'null`,
+  `'stdout` (stderr only), and a port — verbatim from the table above.
+- **`run-process` with drain fibers and a `process-timeout` condition
+  carrying the partial output**, exactly as Phase 4 promised.
+
+### Divergences and additions
+
+1. **`pass-fds:` was never implemented, and is withdrawn.** The API table
+   lists it on `spawn-process`; shipped `spawn-process` accepts
+   `stdin:`/`stdout:`/`stderr:`, `directory:`, `env:` and `new-group:`,
+   and nothing else. What replaced it is narrower and sufficient: a
+   redirection spec may *be* an fd-backed port, which covers "hand the
+   child this file/socket" for the three slots that have names. A general
+   allowlist for arbitrary extra descriptors has no consumer, and every
+   one it would serve needs the child to know the number — a convention
+   the child's own command line has to carry anyway. Reintroduce it if a
+   concrete program needs it; the option name is reserved.
+
+2. **`run-process` is Scheme, not a primitive.** Its body is
+   `primitives_process.run_process_src`, installed over a
+   `bootstrapStub` by `vm_bootstrap.install`. Spawning and joining fibers
+   is dispatch-loop work a native frame cannot do, so the same route `map`
+   and `for-each` take was the only one available — which is why Phase 1
+   added `%process-spawn`, a positional, option-free internal entry point,
+   for this layer to build on. Two consequences the KEP did not anticipate:
+   the install has to be gated on that primitive being *registered* (it is
+   absent under `--sandbox` as well as on WASM), and the definition cannot
+   use `guard`, whose desugaring reaches a helper `install` purges from
+   globals immediately afterwards.
+
+3. **`run-process` gained `output:`, and three unstated defaults became
+   decisions.** `output:` takes `'string` (the default) or `'bytevector`;
+   without it a child emitting non-UTF-8 bytes would fail inside
+   `utf8->string` with a type error naming a procedure the caller never
+   called. The three defaults: stdin is `'null` unless `input:` is given
+   (Go's `exec.Cmd` rule — a one-shot capture must never block on the
+   terminal); `timeout:` implies `new-group: #t`, because `process-kill`
+   refuses `'group:` on a child sharing the parent's own group *and*
+   because the group kill is what lets the drains reach EOF when a
+   grandchild inherited the pipe; and the timeout kill is SIGKILL, since a
+   timeout is a bound and a child ignoring SIGTERM would make it a
+   suggestion (Python's `run()` kills for the same reason).
+
+4. **A third `process-wait` tier: the polled park.** The KEP has two —
+   registered, and blocking with no scheduler. Phase 2 found a kernel that
+   accepts neither: `pidfd_open` is `ENOSYS` before Linux 5.3 *and* under
+   Rosetta's x86_64 syscall translation, which CI actually runs. Falling
+   back to the blocking wait there would deadlock any program whose child
+   exits only after a sibling fiber acts — the KEP's own starvation test.
+   So a failed registration degrades to a `WNOHANG` reap at a 20 ms cadence
+   with the fiber parked on the timer heap between probes, and siblings
+   keep running.
+
+5. **Windows `signal:` folds to `128 + n`, the shell convention.** The KEP
+   said only "folded into the child's exit code as `TerminateProcess`'s
+   argument". `process_win.terminateExitCode` makes that `128 + n`, so
+   `'signal: 9` reports `137` rather than losing the distinction
+   altogether. The residual ambiguity — a child that *chose* to exit 137 —
+   is inherent to a platform with no signals.
+
+6. **Two redirection-port rejections the KEP did not foresee.** A port the
+   fiber scheduler has already flipped non-blocking is refused (the
+   child's slot would share the open file description, `O_NONBLOCK`
+   included, and the parent's next I/O would re-flip it), and a port with
+   buffered read-ahead on an unseekable descriptor is refused rather than
+   silently skipping the child past those bytes. Seekable ones are
+   rewound, and that rewind must happen *before* the output drain on a
+   bidirectional port.
+
+7. **`SIGPIPE` is handled explicitly on both sides.** The parent sets
+   `SIG_IGN` process-wide at `VM.init` — otherwise writing to a child that
+   exited kills the runtime instead of raising — and the child's
+   disposition is reset to default before exec, since an ignored
+   disposition survives `exec` and a spawned program would otherwise
+   inherit Kaappi's policy rather than the shell's.
+
+8. **`process-environment` is a procedure in its own right.** The KEP
+   mentions it only inside the `env:` row. It ships as an exported
+   zero-argument procedure returning the `(name . value)` alist `env:`
+   accepts, because `env:` replaces the environment wholesale and
+   copy-and-extend is the common case — and on Windows a wholesale
+   replacement that dropped the platform's own variables leaves many
+   children unable to start at all.
+
+9. **The `process-timeout` condition takes no new `KP` code.** It is an
+   error object with `error_type = .process_timeout`, following the
+   `channel_timeout` precedent, and stays `uncategorized` under KEP-0005.
+   Its irritants are `(argv seconds)`; the partial output rides
+   `uncaught_reason` as a `(stdout . stderr)` pair instead, so an uncaught
+   timeout does not print however many megabytes the child wrote.
+
+10. **The implementation plan's Phase 4 line says "cond-expand feature".**
+    That contradicts the Scheme-surface section above it, which explains
+    why no `kaappi-process` identifier is added. The section is right and
+    the plan line was stale; nothing shipped a feature identifier.
+
+### Open follow-ups
+
+- **Release.** Nothing here is in a released binary. `Final` waits on the
+  first release that contains all four phases.
+- **Two fd-inheritance leaks predating this KEP**, found by its own
+  CLOEXEC audit and tracked separately:
+  [#2422](https://github.com/kaappi/kaappi/issues/2422) (test/dev fd pairs
+  stay inheritable) and
+  [#2424](https://github.com/kaappi/kaappi/issues/2424) (`fd->port` leaves
+  foreign FFI descriptors inheritable, so a Linux child can inherit a
+  kaappi-net socket). Neither is reachable through `(kaappi process)`'s own
+  spawn path, which closes by default; both weaken the guarantee for
+  descriptors created elsewhere.
 
 ## Implementation plan
+
+*All four phases landed between 2026-08-31 and 2026-09-01; see
+[As implemented](#as-implemented-phases-14--amended-2026-09-01). Phase 4's
+"cond-expand feature" line was stale when written — see Divergence 10.*
 
 1. **Phase 1 — spawn + ports (POSIX).** `types_process.zig`,
    `primitives_process.zig` with `%process-spawn`, file-actions
