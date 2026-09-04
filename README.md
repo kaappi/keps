@@ -69,7 +69,7 @@ Withdrawn   Rejected / Superseded
 | [0019](keps/0019-reader.md) | The Datum Reader | Draft (Informational) | `kaappi` core |
 | [0020](keps/0020-ir-and-bytecode-emission.md) | The IR Pipeline and Bytecode Emitter | Draft (Informational) | `kaappi` core |
 | [0021](keps/0021-bytecode-vm.md) | The Register-Based Bytecode VM | Draft (Informational) | `kaappi` core |
-| [0022](keps/0022-subprocess-support.md) | Native Subprocess Support — `(kaappi process)` | Accepted (amended 2026-09-01: all four phases as implemented; unreleased, and two pre-existing fd-inheritance leaks tracked — see its As-implemented section) | `kaappi` core |
+| [0022](keps/0022-subprocess-support.md) | Native Subprocess Support — `(kaappi process)` | Final (amended 2026-09-01: all four phases as implemented; amended 2026-09-04: shipped in v0.26.0, fd-inheritance follow-ups kaappi#2422/#2424 resolved — see its As-implemented section) | `kaappi` core |
 
 ## License
 

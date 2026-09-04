@@ -5,7 +5,7 @@
 | **KEP** | 0022 |
 | **Title** | Native Subprocess Support — `(kaappi process)` |
 | **Author** | Baiju Muthukadan <baiju.m.mail@gmail.com> |
-| **Status** | Accepted (amended 2026-09-01: [As implemented](#as-implemented-phases-14--amended-2026-09-01); all four phases landed on `main`, unreleased at time of writing) |
+| **Status** | Final (amended 2026-09-01: [As implemented](#as-implemented-phases-14--amended-2026-09-01); amended 2026-09-04: shipped in v0.26.0 and both fd-inheritance follow-ups resolved) |
 | **Type** | Standards |
 | **Target** | `kaappi` core (`src/`, reactor, new `(kaappi process)` library) |
 | **Created** | 2026-08-29 |
@@ -16,11 +16,15 @@
 2026-08-28) and were verified directly against that source as of
 2026-08-29.*
 
-*Amended 2026-09-01: all four phases have landed on `main` (unreleased).
-The design below is the proposal as written; the
+*Amended 2026-09-01: all four phases have landed on `main` (unreleased at
+the time). The design below is the proposal as written; the
 [As implemented](#as-implemented-phases-14--amended-2026-09-01) section
 records what shipped, where it differs, and how the four unresolved
 questions were settled. Read them together.*
+
+*Amended 2026-09-04: v0.26.0 shipped all four phases, and the two
+fd-inheritance follow-ups (kaappi#2422, kaappi#2424) are resolved — status
+is `Final`.*
 
 ## Summary
 
@@ -522,10 +526,11 @@ ahead of this KEP's ratification:
 [#2417](https://github.com/kaappi/kaappi/issues/2417)). This amendment
 accepts them retroactively and records the deltas.
 
-**Status is `Accepted`, not `Final`:** nothing here has shipped in a
-release — v0.25.0 (2026-08-27) predates Phase 1 — and the process reserves
-`Final` for a released, reconciled design. The remaining step is the next
-release, plus the two follow-ups flagged below.
+**Status was `Accepted`, not `Final`, when this amendment was written:**
+nothing had shipped in a release — v0.25.0 (2026-08-27) predates Phase 1 —
+and the process reserves `Final` for a released, reconciled design.
+*Amended 2026-09-04: v0.26.0 (2026-09-04) shipped all four phases and both
+follow-ups below are resolved, so the KEP is now `Final`.*
 
 As-built citations are pinned to commit
 [`3fce40d2`](https://github.com/kaappi/kaappi/commit/3fce40d2) (main,
@@ -657,8 +662,11 @@ section records only what differs from, or was added to, the design above.
 
 ### Open follow-ups
 
-- **Release.** Nothing here is in a released binary. `Final` waits on the
-  first release that contains all four phases.
+*Both resolved as of the 2026-09-04 amendment; recorded as written.*
+
+- **Release.** ~~Nothing here is in a released binary. `Final` waits on the
+  first release that contains all four phases.~~ **Resolved:** v0.26.0
+  (2026-09-04) is that release.
 - **Two fd-inheritance leaks predating this KEP**, found by its own
   CLOEXEC audit and tracked separately:
   [#2422](https://github.com/kaappi/kaappi/issues/2422) (test/dev fd pairs
@@ -667,7 +675,7 @@ section records only what differs from, or was added to, the design above.
   foreign FFI descriptors inheritable, so a Linux child can inherit a
   kaappi-net socket). Neither is reachable through `(kaappi process)`'s own
   spawn path, which closes by default; both weaken the guarantee for
-  descriptors created elsewhere.
+  descriptors created elsewhere. **Resolved:** both issues are closed.
 
 ## Implementation plan
 
