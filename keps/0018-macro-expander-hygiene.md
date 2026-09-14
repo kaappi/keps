@@ -447,11 +447,17 @@ Retroactive; no code changes. Process and documentation steps:
 2. **Correct the stale record**: update `architecture.md` ("Only
    syntax-rules …") and annotate KEP-0006/0007 that procedural transformers
    shipped as SRFI 211 (v0.22.0), with this KEP as the internal reference.
-   *(2026-08-27: the KEP-0006 annotation landed in keps#47; the KEP-0007
-   annotation and the `architecture.md` update remain pending.)*
+   *(2026-08-27: the KEP-0006 annotation landed in keps#47. 2026-09-14: the
+   `architecture.md` correction landed in kaappi#2579; the KEP-0007
+   annotation remains pending.)*
 3. **Write the first `docs/dev/expander.md`** (hygiene mechanism, scope
    table, the flag encoding, the depth/chain split) seeded from this KEP's
    reference section, and link it here.
+   *(Done 2026-09-14, kaappi#2581:
+   [`docs/dev/expander.md`](https://github.com/kaappi/kaappi/blob/main/docs/dev/expander.md)
+   is the as-built guide; it describes `compare` as binding-aware (kaappi#2401)
+   and the post-#1853 file split, both of which postdate the reference
+   section above.)*
 4. **Resolve the representation question** (Unresolved 2) jointly with
    KEP-0007, stating explicitly that `syntax-case` requires replacing the
    symbol-name hygiene encoding.
