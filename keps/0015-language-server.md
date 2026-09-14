@@ -181,6 +181,11 @@ This KEP re-specifies none of that. It references KEP-0005 as `Requires`.
 
 ### What the LSP *adds* on top of the contract
 
+*(Stale since kaappi#1981, 2026-08: all three choices below were reversed —
+ranges are span-accurate, `data.suggestions` still absent, and every
+finding is published. `docs/dev/lsp.md` describes the shipped behaviour;
+this section is kept as the record of what the pin looked like.)*
+
 Three deliberate LSP-only choices sit above the shared serializer:
 
 1. **Whole-line ranges.** `addDiagnostic` (`kaappi_lsp.zig:1018`) builds the
@@ -372,9 +377,18 @@ Retroactive; no code changes. Process and documentation steps:
    those are slated to change soon, note them as forthcoming.
 3. **Write the first `docs/dev/lsp.md`** seeded from this KEP's reference
    section (the LSP currently has no dev doc), and link it back here.
+   *(2026-09-14: [`docs/dev/lsp.md`](https://github.com/kaappi/kaappi/blob/main/docs/dev/lsp.md)
+   landed in kaappi#2587, written from the source rather than this
+   section — see the note on "What the LSP adds" below, which this KEP's
+   pin predates.)*
 4. **Decide the diagnostic-precision and all-errors questions**
    (Unresolved 1–2), since both are LSP-side only and already have partial
    test scaffolding.
+   *(Resolved by kaappi#1981, 2026-08: the server now drives
+   `check.analyzeSource` and serializes every finding with `spanRange`,
+   so ranges are span-accurate, all errors and every `KP4xxx` lint are
+   published, and `tests/scheme/lsp/lsp.sh` cross-checks the result against
+   `kaappi check --diagnostics=json`.)*
 5. **Cross-link KEP-0005** from `lsp_diagnostic.zig` and this KEP so the
    shared-serializer boundary is discoverable from code.
 6. **On acceptance**, triage the navigation, completion/hover, and
