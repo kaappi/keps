@@ -393,9 +393,18 @@ Retroactive; no code changes. Process and documentation steps:
    consolidated one — seeded from this KEP's reference section, and link
    them here; `gc-safety-and-error-handling.md` continues to own the
    day-to-day rooting rules.
+   *(2026-09-14: a single consolidated
+   [`docs/dev/memory.md`](https://github.com/kaappi/kaappi/blob/main/docs/dev/memory.md)
+   landed in kaappi#2583, written from the source rather than this
+   section, which has drifted since the pin: `ObjectTag` has 42 variants
+   (`process`, KEP-0022), and `gc_deep_copy.zig` refuses twelve tags, not
+   fourteen. `gc-safety-and-error-handling.md` keeps the rules and now
+   points at `memory.md` for the collector.)*
 3. **Correct the record** where prior descriptions said "47-bit fixnum" or
    implied a single generation: it is a 48-bit `i48` payload and a
    two-generation collector.
+   *(2026-09-14: `memory.md` states both; no `47-bit` or single-generation
+   wording remains in the kaappi repo's README, CLAUDE.md or docs/dev.)*
 4. **State the value encoding's stability stance** (Unresolved 1) alongside
    KEP-0014's `compilerHash`, so the "internal, same-version only" contract
    is explicit in both places.
