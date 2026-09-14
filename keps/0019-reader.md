@@ -403,6 +403,15 @@ Retroactive; no code changes. Process and documentation steps:
 2. **Correct and expand the docs**: fix the architecture-doc line counts,
    and write the first `docs/dev/reader.md` (grammar, SRFI set, datum-label
    patching, spans) seeded from this KEP's reference section.
+   *(2026-09-14: [`docs/dev/reader.md`](https://github.com/kaappi/kaappi/blob/main/docs/dev/reader.md)
+   landed in kaappi#2584, written from the source rather than this
+   section, which has drifted since the pin: the SRFI 4/160 `#TAG(`
+   literals (kaappi#2548), a monotone line/col cursor behind span
+   recording (kaappi#1888), fold-case persisting across `read` calls
+   (kaappi#2175 is fixed), and the three files are now ~1260/~1470/~460
+   lines. The `architecture.md` line counts are corrected in kaappi#2585.
+   The `/r7rs-reader` skill, which still listed most of the grammar as
+   unimplemented, was rewritten in the same PR.)*
 3. **Decide the extension-set and datum-label-limit questions**
    (Unresolved 1, 3) and annotate the grammar section accordingly.
 4. **Cross-link KEP-0005** (the `KP1xxx` mapping of the reader's conditions),
