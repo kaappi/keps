@@ -462,11 +462,21 @@ Retroactive; no code changes. Process and documentation steps:
    at this KEP as the consolidated execution reference, and write the first
    `docs/dev/vm.md` (frame model, calling convention, error taxonomy) seeded
    from this KEP's reference section.
+   *(2026-09-14: `docs/dev/vm.md` landed in kaappi#2582 —
+   [`docs/dev/vm.md`](https://github.com/kaappi/kaappi/blob/main/docs/dev/vm.md)
+   — written from the source rather than this section, which has since
+   drifted: the ISA is 34 opcodes (`values_list`, `guard_builtin`, `apply`
+   added), and the built-in count is 719. `vm.md` links here and
+   `bytecode.md` links `vm.md`; the direct pointers from `bytecode.md` and
+   the two decision records to this KEP remain pending.)*
 3. **Decide the ISA-stability and dispatch-model questions**
    (Unresolved 1–2), and if the ISA is deemed a frozen internal contract,
    record the versioning expectation alongside KEP-0014's `compilerHash`.
 4. **Document the catchable/uncatchable taxonomy as a `guard` guarantee**
    (Unresolved 5), since it is a user-visible semantic contract.
+   *(2026-09-14: stated as a contract for contributors in `vm.md` and
+   `gc-safety-and-error-handling.md`; the user-facing statement on
+   kaappi-lang.org remains pending.)*
 5. **Cross-link KEP-0020** (emitter / calling-convention counterpart),
    **KEP-0014** (serialization), **KEP-0017** (values/GC roots),
    **KEP-0001/0002** (reactor / cross-thread), and **KEP-0010** (native
