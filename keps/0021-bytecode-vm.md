@@ -466,9 +466,10 @@ Retroactive; no code changes. Process and documentation steps:
    [`docs/dev/vm.md`](https://github.com/kaappi/kaappi/blob/main/docs/dev/vm.md)
    — written from the source rather than this section, which has since
    drifted: the ISA is 34 opcodes (`values_list`, `guard_builtin`, `apply`
-   added), and the built-in count is 719. `vm.md` links here and
-   `bytecode.md` links `vm.md`; the direct pointers from `bytecode.md` and
-   the two decision records to this KEP remain pending.)*
+   added), and the built-in count is 719. `vm.md` links here, and
+   since kaappi#2588 so do `bytecode.md` and both decision records
+   (`continuation-strategy.md`, `self-tail-call-optimization.md`), which
+   closes this step.)*
 3. **Decide the ISA-stability and dispatch-model questions**
    (Unresolved 1–2), and if the ISA is deemed a frozen internal contract,
    record the versioning expectation alongside KEP-0014's `compilerHash`.
