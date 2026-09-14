@@ -387,11 +387,12 @@ Retroactive; no code changes. Process and documentation steps:
    excludes `kaappi.process` (KEP-0022), and `tests/scheme/sandbox/` holds
    four scripts. The limits (5 callable parameters, 32 callback slots, 7
    signatures) are stated there as current implementation limits, not
-   guarantees, pending Unresolved 1. Step 4's pointers from
-   `sandbox-escape.sh` and `primitives_ffi.zig` to this KEP do not exist
-   yet.)*
+   guarantees, pending Unresolved 1.)*
 4. **Add a one-line pointer** from `tests/scheme/sandbox/sandbox-escape.sh`
    and the FFI primitives to this KEP as the policy's written source.
+   *(2026-09-14: done in kaappi#2588 — the test's header and the doc
+   comment on `checkSandbox` in `primitives_ffi.zig` name this KEP,
+   `docs/dev/ffi.md`, and each other.)*
 5. **Publish user-facing guidance** on `kaappi.github.io` for `--sandbox`
    (what is and isn't available) and for FFI (the pointer-safety and
    sandbox-interaction caveats), linking this KEP.
