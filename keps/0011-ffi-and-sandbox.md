@@ -381,6 +381,15 @@ Retroactive; no code changes. Process and documentation steps:
    the numbers accordingly.
 3. **Write `docs/dev/ffi.md`** (Unresolved 2) — FFI has none today — using
    this KEP's reference section as the seed, and link it back here.
+   *(2026-09-14: [`docs/dev/ffi.md`](https://github.com/kaappi/kaappi/blob/main/docs/dev/ffi.md)
+   landed in kaappi#2586, written from the source rather than this
+   section, which has drifted since the pin: `sandboxAllowed` now also
+   excludes `kaappi.process` (KEP-0022), and `tests/scheme/sandbox/` holds
+   four scripts. The limits (5 callable parameters, 32 callback slots, 7
+   signatures) are stated there as current implementation limits, not
+   guarantees, pending Unresolved 1. Step 4's pointers from
+   `sandbox-escape.sh` and `primitives_ffi.zig` to this KEP do not exist
+   yet.)*
 4. **Add a one-line pointer** from `tests/scheme/sandbox/sandbox-escape.sh`
    and the FFI primitives to this KEP as the policy's written source.
 5. **Publish user-facing guidance** on `kaappi.github.io` for `--sandbox`
